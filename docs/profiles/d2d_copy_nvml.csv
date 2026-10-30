@@ -1,0 +1,2 @@
+timestamp,sm_clock_mhz,mem_clock_mhz,temp_c,power_w,throttle_mask,throttle_reasons
+1793331281.8720,2250,8001,58,16.46,0x1,GPU_IDLE

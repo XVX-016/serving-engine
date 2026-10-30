@@ -1,0 +1,8 @@
+build/
+data/
+third_party/llama.cpp/
+*.pyc
+__pycache__/
+*.obj
+*.lib
+*.exe

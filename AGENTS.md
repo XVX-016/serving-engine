@@ -52,3 +52,4 @@ The goal is correct, measured, honestly reported results. Negative results are r
 - A needed measurement is impossible here (profiler permissions, driver, missing tool).
 - The task is on track to exceed about 12 hours of agent work.
 - You are about to claim a performance win you could not reproduce twice.
+
