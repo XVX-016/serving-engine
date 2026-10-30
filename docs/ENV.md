@@ -11,9 +11,17 @@
 - **Operating System**: Windows 11
 - **CUDA Toolkit**: 12.4 (`nvcc` V12.4.99)
 - **Host Compiler**: Microsoft Visual Studio 2022 Community (v17.14.23, MSVC `cl.exe` 19.44.35222)
+  - Note: MSVC 19.44 was accepted natively by nvcc 12.4 in CMake without requiring `-allow-unsupported-compiler`.
 - **CMake**: 3.31.6 (`C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`)
 - **Ninja**: 1.12.1 (`C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe`)
-- **Python**: 3.10.0 (with PyTorch 2.6.0+cu124, transformers 5.15.0)
+- **Python**: 3.10.0
+- **PyTorch**: 2.6.0+cu124
+- **Transformers**: 5.15.0
+- **Triton**: 3.8.0
+
+## Reference Engine Submodule
+- **Repository**: `reference/py-engine` (https://github.com/XVX-016/vLLM-inference-engine)
+- **Pinned Commit SHA**: `bdede99aad785b26608181301843d2a4e3226023` (tag `v1.0` / main freeze)
 
 ## Build and Test Commands
 
