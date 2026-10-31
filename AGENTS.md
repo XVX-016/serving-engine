@@ -45,6 +45,7 @@ The goal is correct, measured, honestly reported results. Negative results are r
 - Deviations from the plan and why.
 - Open risks and suspected causes of anything unexplained.
 - Suggested next steps (do not start them).
+- Next session must know: 3 to 5 bullets of anything not obvious from the code or the     files above (workarounds, flaky measurements, decisions made in chat, things you were unsure about). Write this last, and keep it short. The next agent reads it first.
 
 ## Stop and ask the human when
 - A gate fails after two serious fix attempts.
