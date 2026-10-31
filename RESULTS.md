@@ -14,6 +14,7 @@
 | P0b  | Interleaved llama.cpp F16 (B) | 1 | 512 | 128 | 22697.4 | 5.11 | 195.8 | 942.43 MiB | - | Order A B A B A B (3 reps: 187.6, 196.1, 195.8 tok/s). `llama-bench.exe -m data/models/qwen2.5-0.5b-instruct-fp16.gguf -p 512 -n 128 -ngl 99 -r 1`. Median SM clock 2250 MHz, throttle reasons GPU_IDLE\|SW_POWER_CAP (GPU hitting 80W power ceiling). |
 | P0b  | llama.cpp Q8_0 (Plugged-in, truncated) | 1 | 512 | 128 | 27387.7 | 3.78 | 264.7 | 500.79 MiB | - | `llama-bench.exe -m data/models/qwen2.5-0.5b-instruct-q8_0.gguf -p 512 -n 128 -ngl 99 -r 5`. tg128=264.71 ± 56.18 t/s. |
 | P0b  | llama.cpp Q4_K_M (Plugged-in) | 1 | 512 | 128 | 20601.8 | 3.10 | 322.9 | 462.96 MiB | - | `llama-bench.exe -m data/models/qwen2.5-0.5b-instruct-q4_k_m.gguf -p 512 -n 128 -ngl 99 -r 5`. tg128=322.90 ± 22.17 t/s. |
+| P1   | Cold-start weight loader (Process start to host) | - | - | - | - | 968.77 ms | - | 942.3 MB | - | `build\generate.exe --time-load`. Config parse: 0.20 ms; Open & mmap: 0.72 ms; Bind & validate: 0.03 ms; Tokenizer load: 163.84 ms; BF16->FP16 host conversion (494M params, 942 MB): 803.99 ms (1172 MB/s). Pure zero-copy mmap-to-pointers: < 1.0 ms. |
 | P3   | Naive GPU, cuBLAS, no cache | 1 | | | | | | | | |
 | P4   | KV cache + sampling | 1 | | | | | | | | |
 | P5   | Custom GEMV/GEMM + fusion | 1 | | | | | | | | |

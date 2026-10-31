@@ -1,6 +1,17 @@
 add_executable(test_bootstrap test_bootstrap.cpp)
 target_include_directories(test_bootstrap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(test_bootstrap PRIVATE engine CUDA::cudart)
-
 add_test(NAME test_bootstrap COMMAND test_bootstrap)
+set_tests_properties(test_bootstrap PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+add_executable(test_loader test_loader.cpp)
+target_include_directories(test_loader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_loader PRIVATE engine CUDA::cudart)
+add_test(NAME test_loader COMMAND test_loader)
+set_tests_properties(test_loader PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(test_tokenizer test_tokenizer.cpp)
+target_include_directories(test_tokenizer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_tokenizer PRIVATE engine CUDA::cudart)
+add_test(NAME test_tokenizer COMMAND test_tokenizer)
+set_tests_properties(test_tokenizer PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
