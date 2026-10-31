@@ -26,6 +26,9 @@ target_compile_options(engine PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 add_executable(generate apps/generate.cpp)
 target_link_libraries(generate PRIVATE engine)
 
+add_executable(bench_read_bandwidth apps/bench_read_bandwidth.cpp)
+target_link_libraries(bench_read_bandwidth PRIVATE engine)
+
 find_package(pybind11 CONFIG QUIET)
 if(pybind11_FOUND)
   pybind11_add_module(engine_cpp src/bindings/module.cpp)

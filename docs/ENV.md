@@ -9,6 +9,9 @@
 
 ## Software & Toolchain
 - **Operating System**: Windows 11
+- **Power Configuration**: High Performance Plan (`8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c`), AC Power Online (`PowerOnline=True`).
+  - *Warning*: On battery power, Windows/WDDM enforces an aggressive `SW_POWER_CAP` (24W limit vs. 80W default TDP) and cuts memory clock from 8,001 MHz to 5,920 MHz, causing ~50% throughput drops. All official benchmarks require AC power connection.
+- **GPU Power Limit**: 80.0 W default (Min: 20.0 W, Max: 140.0 W)
 - **CUDA Toolkit**: 12.4 (`nvcc` V12.4.99)
 - **Host Compiler**: Microsoft Visual Studio 2022 Community (v17.14.23, MSVC `cl.exe` 19.44.35222)
   - Note: MSVC 19.44 was accepted natively by nvcc 12.4 in CMake without requiring `-allow-unsupported-compiler`.
@@ -18,10 +21,11 @@
 - **PyTorch**: 2.6.0+cu124
 - **Transformers**: 5.15.0
 - **Triton**: 3.8.0
+- **llama.cpp**: Commit `3c809f4` (built with CUDA backend sm_89 via CMake Ninja)
 
 ## Reference Engine Submodule
 - **Repository**: `reference/py-engine` (https://github.com/XVX-016/vLLM-inference-engine)
-- **Pinned Commit SHA**: `bdede99aad785b26608181301843d2a4e3226023` (tag `v1.0` / main freeze)
+- **Pinned Commit SHA**: `bdede99aad785b26608181301843d2a4e3226023` (Tag `v1.0` does not exist on remote; human must tag `v1.0` on upstream repo)
 
 ## Build and Test Commands
 
