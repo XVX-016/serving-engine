@@ -1,24 +1,44 @@
 #include "src/loader/safetensors.h"
 #include "src/model/config.h"
+#include "src/model/forward_cpu.h"
 #include "src/tokenizer/bpe.h"
+#include "third_party/nlohmann/json.hpp"
+
 
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <string>
 #include <vector>
 #include <memory>
 #include <cstring>
+#include <filesystem>
+#include <algorithm>
+
+namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     bool time_load = false;
+    bool dump_all = false;
     std::string model_path = "data/models/hf-cache/snapshots/7ae557604adf67be50417f59c2c2f167def9a775";
+    std::string prompt = "";
+    int max_new_tokens = 32;
+    std::string dump_dir = "";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--time-load") {
             time_load = true;
+        } else if (arg == "--dump-all") {
+            dump_all = true;
         } else if (arg == "--model" && i + 1 < argc) {
             model_path = argv[++i];
+        } else if (arg == "--prompt" && i + 1 < argc) {
+            prompt = argv[++i];
+        } else if (arg == "--max-new-tokens" && i + 1 < argc) {
+            max_new_tokens = std::stoi(argv[++i]);
+        } else if (arg == "--dump" && i + 1 < argc) {
+            dump_dir = argv[++i];
         }
     }
 
@@ -67,7 +87,6 @@ int main(int argc, char** argv) {
 
         // 5. Weight Conversion Test (Host BF16 to Host FP16 / FP32)
         auto t_conv_start = std::chrono::high_resolution_clock::now();
-        // Allocate host buffer for all weights to measure full conversion throughput
         size_t total_elements = 0;
         for (const auto& [name, info] : loader.tensors()) {
             total_elements += static_cast<size_t>(info.numel());
@@ -104,6 +123,217 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::cout << "Serving Engine CLI. Pass --time-load to measure load latency.\n";
+    // Load config, weights, tokenizer for forward pass or generation
+    engine::ModelConfig cfg = engine::ModelConfig::from_file(model_path + "/config.json");
+    engine::SafetensorsLoader loader;
+    if (!loader.open(model_path + "/model.safetensors")) {
+        std::cerr << "Failed to open safetensors file: " << model_path + "/model.safetensors" << std::endl;
+        return 1;
+    }
+
+    engine::ModelWeights weights;
+    if (!weights.load_and_validate(cfg, loader)) {
+        std::cerr << "Failed to validate model weights!" << std::endl;
+        return 1;
+    }
+
+    engine::BPETokenizer tokenizer;
+    if (!tokenizer.load(model_path + "/tokenizer.json")) {
+        std::cerr << "Failed to load tokenizer.json!" << std::endl;
+        return 1;
+    }
+
+    // Convert weights to FP32 once
+    engine::ModelWeightsFP32 weights_fp32;
+    if (!weights_fp32.init_from_weights(cfg, weights)) {
+        std::cerr << "Failed to convert weights to FP32!" << std::endl;
+        return 1;
+    }
+
+    // Case 1: dump-all reference prompts for compare.py
+    if (dump_all) {
+        std::string ref_dir = "data/reference";
+        std::string target_dir = "data/dump_cpu";
+        std::cout << "Running CPU forward pass and dumping tensors to " << target_dir << "...\n";
+
+        std::vector<std::string> prompt_dirs = {
+            "01_short", "02_medium", "03_long", "04_code",
+            "05_unicode", "06_cjk_emoji", "07_chat_template", "08_whitespace_indent"
+        };
+
+        for (const auto& p_id : prompt_dirs) {
+            std::string prompt_ref = ref_dir + "/" + p_id;
+            std::string prompt_out = target_dir + "/" + p_id;
+            fs::create_directories(prompt_out);
+
+            // Read token_ids.npy from reference
+            std::string token_file = prompt_ref + "/token_ids.npy";
+            std::ifstream tf(token_file, std::ios::binary);
+            if (!tf.is_open()) {
+                std::cerr << "Cannot open token file: " << token_file << std::endl;
+                continue;
+            }
+
+            // Parse NPY header for token_ids
+            char magic[6];
+            tf.read(magic, 6);
+            char ver[2];
+            tf.read(ver, 2);
+            uint16_t hlen = 0;
+            tf.read(reinterpret_cast<char*>(&hlen), 2);
+            std::string header(hlen, ' ');
+            tf.read(&header[0], hlen);
+
+            // Determine length from file size or header
+            // Since shape is [1, S], total bytes = S * 8
+            tf.seekg(0, std::ios::end);
+            size_t file_len = tf.tellg();
+            size_t data_len = file_len - (10 + hlen);
+            size_t S = data_len / sizeof(int64_t);
+
+            tf.seekg(10 + hlen, std::ios::beg);
+            std::vector<int64_t> tokens(S);
+            tf.read(reinterpret_cast<char*>(tokens.data()), data_len);
+
+            std::cout << "  [" << p_id << "] tokens: " << S << " ... ";
+            auto t0 = std::chrono::high_resolution_clock::now();
+            engine::forward_cpu(tokens, cfg, weights_fp32, prompt_out);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double dt_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::cout << "done in " << dt_ms << " ms\n";
+        }
+        std::cout << "Dump complete.\n";
+        return 0;
+    }
+
+    bool verify_greedy = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--verify-greedy") {
+            verify_greedy = true;
+        }
+    }
+
+    if (verify_greedy) {
+        std::cout << "=== Verifying 32-Token Greedy Generation against HF Reference ===\n";
+        std::vector<std::pair<std::string, std::string>> test_prompts = {
+            {"01_short", "The capital of France is"},
+            {"02_medium", "Deep learning inference engines optimize memory bandwidth and cache locality to achieve high token generation speeds on modern GPUs."},
+            {"04_code", "def quicksort(arr):\n"},
+            {"06_cjk_emoji", "你好，世界！🚀 こんにちは世界！🌟 안녕하세요 세계! 🇨🇳 🇯🇵 🇰🇷"},
+            {"08_whitespace_indent", "class TransformerBlock:\n"}
+        };
+
+        // Load reference JSON
+        std::ifstream f_ref("data/reference/hf_greedy_32_pure.json");
+        if (!f_ref.is_open()) {
+            std::cerr << "Failed to open data/reference/hf_greedy_32_pure.json\n";
+            return 1;
+        }
+        nlohmann::json j_ref;
+        f_ref >> j_ref;
+
+        int total_tested = 0;
+        int total_passed = 0;
+
+        for (const auto& [pid, ptext] : test_prompts) {
+            std::vector<int> initial_toks = tokenizer.encode(ptext, false);
+            std::vector<int64_t> cur_tokens(initial_toks.begin(), initial_toks.end());
+            std::vector<int> gen_tokens;
+
+            std::cout << "[" << pid << "] Generating 32 tokens... " << std::flush;
+            auto t0 = std::chrono::high_resolution_clock::now();
+
+            for (int step = 0; step < 32; ++step) {
+                std::vector<float> logits = engine::forward_cpu(cur_tokens, cfg, weights_fp32);
+                int64_t last_pos = static_cast<int64_t>(cur_tokens.size()) - 1;
+                const float* last_logits = logits.data() + last_pos * cfg.vocab_size;
+
+                int best_id = 0;
+                float best_val = last_logits[0];
+                for (int64_t v = 1; v < cfg.vocab_size; ++v) {
+                    if (last_logits[v] > best_val) {
+                        best_val = last_logits[v];
+                        best_id = static_cast<int>(v);
+                    }
+                }
+                gen_tokens.push_back(best_id);
+                cur_tokens.push_back(best_id);
+                if (best_id == 151645) break;
+            }
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+
+            std::vector<int> ref_toks = j_ref[pid]["tokens"].get<std::vector<int>>();
+            bool match = (gen_tokens == ref_toks);
+            total_tested++;
+            if (match) total_passed++;
+
+            std::cout << (match ? "PASS" : "FAIL") << " (" << elapsed_s << " s, " << (gen_tokens.size() / elapsed_s) << " tok/s)\n";
+            if (!match) {
+                std::cout << "  Mismatch!\n  Expected: [";
+                for (size_t i = 0; i < ref_toks.size(); ++i) std::cout << (i > 0 ? ", " : "") << ref_toks[i];
+                std::cout << "]\n  Got:      [";
+                for (size_t i = 0; i < gen_tokens.size(); ++i) std::cout << (i > 0 ? ", " : "") << gen_tokens[i];
+                std::cout << "]\n";
+            }
+        }
+
+        std::cout << "=========================================================\n";
+        std::cout << "Summary: " << total_passed << "/" << total_tested << " prompts matched 100% of tokens.\n";
+        return (total_passed == total_tested) ? 0 : 1;
+    }
+
+
+    // Case 2: Greedy generation loop (no KV cache, recomputing each step)
+    if (prompt.empty()) {
+        std::cout << "Usage: generate.exe --prompt <text> [--max-new-tokens N] [--dump <dir>]\n";
+        std::cout << "       generate.exe --dump-all\n";
+        std::cout << "       generate.exe --time-load\n";
+        return 0;
+    }
+
+    std::vector<int> initial_tokens = tokenizer.encode(prompt, false);
+    std::vector<int64_t> tokens(initial_tokens.begin(), initial_tokens.end());
+    std::cout << "Prompt (" << tokens.size() << " tokens): " << prompt << "\n";
+    std::cout << "Generating " << max_new_tokens << " tokens with CPU FP32 (recompute each step)...\n";
+
+    std::vector<int> generated_tokens;
+    int64_t vocab_size = cfg.vocab_size;
+
+    for (int step = 0; step < max_new_tokens; ++step) {
+        std::string step_dump = (step == 0 && !dump_dir.empty()) ? dump_dir : "";
+        std::vector<float> logits = engine::forward_cpu(tokens, cfg, weights_fp32, step_dump);
+
+        // Greedy argmax over last position: [tokens.size() - 1, :]
+        int64_t last_pos = static_cast<int64_t>(tokens.size()) - 1;
+        const float* last_logits = logits.data() + last_pos * vocab_size;
+
+        int best_id = 0;
+        float best_val = last_logits[0];
+        for (int64_t v = 1; v < vocab_size; ++v) {
+            if (last_logits[v] > best_val) {
+                best_val = last_logits[v];
+                best_id = static_cast<int>(v);
+            }
+        }
+
+        generated_tokens.push_back(best_id);
+        tokens.push_back(best_id);
+
+        if (best_id == 151645) { // <|im_end|> or eos
+            break;
+        }
+    }
+
+
+    std::string gen_text = tokenizer.decode(generated_tokens);
+    std::cout << "\nGenerated text:\n" << gen_text << "\n\n";
+    std::cout << "Generated token IDs: [";
+    for (size_t i = 0; i < generated_tokens.size(); ++i) {
+        std::cout << (i > 0 ? ", " : "") << generated_tokens[i];
+    }
+    std::cout << "]\n";
+
     return 0;
 }

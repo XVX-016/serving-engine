@@ -15,7 +15,9 @@
 | P0b  | llama.cpp Q8_0 (Plugged-in, truncated) | 1 | 512 | 128 | 27387.7 | 3.78 | 264.7 | 500.79 MiB | - | `llama-bench.exe -m data/models/qwen2.5-0.5b-instruct-q8_0.gguf -p 512 -n 128 -ngl 99 -r 5`. tg128=264.71 ± 56.18 t/s. |
 | P0b  | llama.cpp Q4_K_M (Plugged-in) | 1 | 512 | 128 | 20601.8 | 3.10 | 322.9 | 462.96 MiB | - | `llama-bench.exe -m data/models/qwen2.5-0.5b-instruct-q4_k_m.gguf -p 512 -n 128 -ngl 99 -r 5`. tg128=322.90 ± 22.17 t/s. |
 | P1   | Cold-start weight loader (Process start to host) | - | - | - | - | 968.77 ms | - | 942.3 MB | - | `build\generate.exe --time-load`. Config parse: 0.20 ms; Open & mmap: 0.72 ms; Bind & validate: 0.03 ms; Tokenizer load: 163.84 ms; BF16->FP16 host conversion (494M params, 942 MB): 803.99 ms (1172 MB/s). Pure zero-copy mmap-to-pointers: < 1.0 ms. |
+| P2   | CPU FP32 reference (recompute no KV) | 1 | 5..84 | 32 | - | ~7430 ms | ~0.13 | 0 MB (Host RAM: ~2.1 GB) | 2.08e-04 | CPU FP32 forward pass matching HF. 72 dumped tensors across 8 prompts pass `compare.py --max-abs 1e-3` (all < 8.4e-4, logits max diff 2.08e-4, 100% argmax agreement). 5/5 reference prompts pass 32-token greedy match with 100% identical token IDs (`build\generate.exe --verify-greedy`). |
 | P3   | Naive GPU, cuBLAS, no cache | 1 | | | | | | | | |
+
 | P4   | KV cache + sampling | 1 | | | | | | | | |
 | P5   | Custom GEMV/GEMM + fusion | 1 | | | | | | | | |
 | P7   | Split-KV decode + flash prefill | 1, 32 | | | | | | | | |

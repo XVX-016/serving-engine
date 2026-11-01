@@ -15,3 +15,10 @@ target_include_directories(test_tokenizer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
 target_link_libraries(test_tokenizer PRIVATE engine CUDA::cudart)
 add_test(NAME test_tokenizer COMMAND test_tokenizer)
 set_tests_properties(test_tokenizer PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(test_cpu_ops test_cpu_ops.cpp)
+target_include_directories(test_cpu_ops PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_cpu_ops PRIVATE engine CUDA::cudart)
+add_test(NAME test_cpu_ops COMMAND test_cpu_ops)
+set_tests_properties(test_cpu_ops PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
