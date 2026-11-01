@@ -29,6 +29,9 @@ target_link_libraries(generate PRIVATE engine)
 add_executable(bench_read_bandwidth apps/bench_read_bandwidth.cpp)
 target_link_libraries(bench_read_bandwidth PRIVATE engine)
 
+add_executable(tokenize_stdin apps/tokenize_stdin.cpp)
+target_link_libraries(tokenize_stdin PRIVATE engine)
+
 find_package(pybind11 CONFIG QUIET)
 if(pybind11_FOUND)
   pybind11_add_module(engine_cpp src/bindings/module.cpp)
