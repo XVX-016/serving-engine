@@ -22,3 +22,9 @@ target_link_libraries(test_cpu_ops PRIVATE engine CUDA::cudart)
 add_test(NAME test_cpu_ops COMMAND test_cpu_ops)
 set_tests_properties(test_cpu_ops PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+add_executable(test_cuda_ops test_cuda_ops.cpp)
+target_include_directories(test_cuda_ops PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_cuda_ops PRIVATE engine CUDA::cudart CUDA::cublas)
+add_test(NAME test_cuda_ops COMMAND test_cuda_ops)
+set_tests_properties(test_cuda_ops PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+

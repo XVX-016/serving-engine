@@ -15,7 +15,7 @@ find_package(CUDAToolkit REQUIRED)
 
 file(GLOB_RECURSE ENGINE_SRC CONFIGURE_DEPENDS
   src/common/*.cpp src/loader/*.cpp src/tokenizer/*.cpp src/cpu/*.cpp
-  src/model/*.cpp src/runtime/*.cpp src/cuda/*.cu src/runtime/*.cu
+  src/model/*.cpp src/model/*.cu src/runtime/*.cpp src/cuda/*.cu src/runtime/*.cu
 )
 
 add_library(engine STATIC ${ENGINE_SRC})
