@@ -7,9 +7,15 @@
 
 - **Total Kernels / API Calls per Step**: 411
 - **Host Wall Time**: 395.242 ms
-- **Total GPU Busy Time**: 118.783 ms
-- **Idle Gap Total**: 276.459 ms (69.9468%)
-- **Is Decode Launch-Bound?**: **YES (Launch Overhead Dominant)**
+- **Total GPU Busy Time (Kernel Execution)**: 118.783 ms
+- **Non-GPU Host / Overhead Gap**: 276.459 ms
+- **Is Decode Launch-Bound?**: **NOT YET MEASURED (Confounded in P3)**
+  - *Analysis of the gap*: True CUDA kernel launches take ~5–20 µs each on modern GPUs, which accounts for at most ~2–8 ms across 411 launches. The remaining ~270 ms gap is dominated by:
+    1. **Synchronous profiling instrumentation**: The in-engine timer calls cudaEventSynchronize around every single kernel/cuBLAS launch, causing host stalls and preventing queue overlap.
+    2. **Massive Host-Device Memory Transfer**: Recompute mode at 512 tokens produces and transfers logits for all 512 positions (512 * 151,936 * 2 ~= 155.6 MB D2H copy).
+    3. **Host Argmax**: The CPU iterates over all 512 * 151,936 ~= 77.8M float elements to select the next token.
+    4. **Unrepresentative Workload**: Recompute mode at 512 tokens is prefill-like, not the single-token cached decode step the launch-bound question addresses.
+  - *Resolution*: Recalibrate the profiling instrument in P4 by removing per-kernel syncs, extracting logits for the last token only, and evaluating a true single-token decode step with KV cache.
 
 ## Top Operations by Accumulated GPU Time
 
