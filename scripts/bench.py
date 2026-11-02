@@ -211,8 +211,69 @@ def benchmark_py_engine(prompt_len: int = 512, gen_tokens: int = 128) -> dict:
         "vram_mb": vram_mb,
     }
 
+def benchmark_p3_gpu(prompt_len: int = 128, gen_tokens: int = 32, num_warmup: int = 5, num_timed: int = 20) -> dict:
+    print(f"\n=== Benchmarking P3 C++ GPU FP16 Recompute (prompt={prompt_len}, gen={gen_tokens}, {num_warmup} warmup + {num_timed} timed) ===")
+    import subprocess
+    base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. "
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokens = tokenizer.encode(base_text)
+    mult = (prompt_len // len(tokens)) + 1
+    input_ids = (tokens * mult)[:prompt_len]
+    prompt_str = tokenizer.decode(input_ids, skip_special_tokens=True)
+
+    csv_path = os.path.join(PROFILES_DIR, f"p3_gpu_p{prompt_len}_nvml.csv")
+    with NVMLLogger(csv_path) as nvml_log:
+        cmd = [
+            "build\\generate.exe",
+            "--gpu",
+            "--prompt", prompt_str,
+            "--max-new-tokens", str(gen_tokens)
+        ]
+        t0 = time.perf_counter()
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        t_total = time.perf_counter() - t0
+
+    # Parse output to find generated tokens
+    gen_tok_count = gen_tokens
+    for line in proc.stdout.splitlines():
+        if "Generated token IDs:" in line:
+            # count elements
+            tok_part = line.split("[")[1].split("]")[0]
+            gen_tok_count = len([x for x in tok_part.split(",") if x.strip()])
+
+    tok_s = gen_tok_count / t_total if t_total > 0 else 0.0
+    ms_per_step = (t_total / gen_tok_count) * 1000.0 if gen_tok_count > 0 else 0.0
+
+    print(f"  Prompt={prompt_len}, Gen={gen_tok_count}: {t_total:.2f} s ({tok_s:.2f} tok/s, {ms_per_step:.2f} ms/step)")
+    nvml_summary = nvml_log.stop()
+    print(f"  NVML: median SM clock = {nvml_summary.get('median_sm_clock_mhz', 'N/A')} MHz, max temp = {nvml_summary.get('max_temp_c', 'N/A')} C")
+
+    return {
+        "prompt_len": prompt_len,
+        "gen_tokens": gen_tok_count,
+        "total_s": t_total,
+        "tok_s": tok_s,
+        "ms_step": ms_per_step,
+        "median_sm_clock": nvml_summary.get("median_sm_clock_mhz", "N/A"),
+        "csv_path": csv_path
+    }
+
 def main():
+    parser = argparse.ArgumentParser(description="Serving engine benchmark suite.")
+    parser.add_argument("--p3", action="store_true", help="Run Task P3 GPU benchmark")
+    parser.add_argument("--all", action="store_true", help="Run all benchmarks")
+    args = parser.parse_args()
+
     os.makedirs(PROFILES_DIR, exist_ok=True)
+
+    if args.p3:
+        res_128 = benchmark_p3_gpu(prompt_len=128, gen_tokens=32)
+        res_512 = benchmark_p3_gpu(prompt_len=512, gen_tokens=32)
+        print("\n=== P3 RESULTS SUMMARY ===")
+        print(f"P3 GPU prompt=128, gen=32: {res_128['tok_s']:.2f} tok/s ({res_128['ms_step']:.2f} ms/step), SM clock {res_128['median_sm_clock']} MHz")
+        print(f"P3 GPU prompt=512, gen=32: {res_512['tok_s']:.2f} tok/s ({res_512['ms_step']:.2f} ms/step), SM clock {res_512['median_sm_clock']} MHz")
+        return
+
     copy_res = benchmark_d2d_copy(num_warmup=5, num_timed=25)
     hf_res = benchmark_hf_eager(prompt_len=512, gen_tokens=128)
     py_res = benchmark_py_engine(prompt_len=512, gen_tokens=128)
