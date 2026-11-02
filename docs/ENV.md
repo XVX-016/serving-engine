@@ -55,3 +55,25 @@ cmake --build build --config Release
 ```powershell
 ctest --test-dir build --output-on-failure
 ```
+
+## Model Weights & GGUF Canonical Checksums
+- `data/models/qwen2.5-0.5b-instruct-fp16.gguf`:
+  - Size: 994,157,152 bytes (948.1021 MiB)
+  - SHA-256: `0b6994e7f4d8a79731690ec2cfc88e468e1489e0a452bb71f5aa0ca369e17bf1`
+  - Converted directly from HF safetensors (`convert_hf_to_gguf.py`). Tied embeddings, 290 tensors.
+- `data/models/qwen2.5-0.5b-instruct-q8_0.gguf`:
+  - Size: 531,068,512 bytes (506.4664 MiB)
+  - SHA-256: `a67dcbddd648ed96333c8383a032996a242038bf7afbbe6ea313901159f65c22`
+  - Quantized from clean FP16 via `llama-quantize.exe`. Tied embeddings, 290 tensors.
+- `data/models/qwen2.5-0.5b-instruct-q4_k_m.gguf`:
+  - Size: 491,400,032 bytes (468.6356 MiB)
+  - SHA-256: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`
+  - Downloaded official Qwen GGUF. Untied embeddings, 291 tensors.
+
+## Profiler & Tracing Guidelines
+- **Nsight Systems CLI (`nsys`)**:
+  - The stock Nsight Systems (v2023.4.4 bundled with CUDA 12.4) fails on Windows 11 with driver 616.x due to `ReflexStatsTraceLoggingProvider` requiring elevation and driver ABI version mismatch.
+  - To run Nsight Systems: install the latest standalone release (2024.x/2025.x) and execute from an elevated (Administrator) terminal.
+- **In-Engine Profiling Fallback**:
+  - Inside our C++ inference engine, per-kernel timing is achieved directly via `cudaEventCreate` / `cudaEventRecord` / `cudaEventElapsedTime` paired with high-resolution host timestamps (`std::chrono::steady_clock`), or the CUPTI activity API (`cuptiActivityEnable`, headers in `CUPTI/include`, lib `cupti.lib`).
+

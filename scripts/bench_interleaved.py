@@ -2,9 +2,10 @@
 """
 scripts/bench_interleaved.py
 
-Interleaved re-run benchmark for Task P0b:
-Runs py-engine and llama.cpp F16 interleaved in order A B A B A B (3 reps each).
-Records ms/step, tok/s, median SM clock, memory clock, power, and NVML throttle reasons.
+Interleaved benchmark for Task P0c:
+Runs py-engine, llama.cpp F16, llama.cpp Q8_0, and llama.cpp Q4_K_M
+in interleaved order across 5 repetitions on AC power.
+Logs NVML clocks, power, temperature, and throttle reasons.
 """
 
 import os
@@ -31,9 +32,11 @@ os.makedirs(PROFILES_DIR, exist_ok=True)
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 LLAMA_BENCH_EXE = os.path.join(ROOT_DIR, "third_party", "llama.cpp", "build", "bin", "llama-bench.exe")
 FP16_GGUF = os.path.join(ROOT_DIR, "data", "models", "qwen2.5-0.5b-instruct-fp16.gguf")
+Q8_0_GGUF = os.path.join(ROOT_DIR, "data", "models", "qwen2.5-0.5b-instruct-q8_0.gguf")
+Q4_K_M_GGUF = os.path.join(ROOT_DIR, "data", "models", "qwen2.5-0.5b-instruct-q4_k_m.gguf")
 
 def run_py_engine(rep_idx: int, runner, prompt_text: str, gen_tokens: int = 128):
-    csv_path = os.path.join(PROFILES_DIR, f"interleaved_pyengine_rep{rep_idx}.csv")
+    csv_path = os.path.join(PROFILES_DIR, f"p0c_interleaved_pyengine_rep{rep_idx}.csv")
     with NVMLLogger(csv_path) as nvml_log:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -45,9 +48,10 @@ def run_py_engine(rep_idx: int, runner, prompt_text: str, gen_tokens: int = 128)
     avg_step_ms = (total_time / (actual_gen + 1)) * 1000.0
     decode_tok_s = 1000.0 / avg_step_ms if avg_step_ms > 0 else 0.0
 
-    # Summarize NVML
     sm_clocks = [s["sm_clock_mhz"] for s in nvml_log._samples] if nvml_log._samples else []
     median_sm = int(np.median(sm_clocks)) if sm_clocks else 0
+    powers = [s["power_w"] for s in nvml_log._samples] if nvml_log._samples else []
+    median_power = float(np.median(powers)) if powers else 0.0
     throttles = set()
     for s in nvml_log._samples:
         for r in s["throttle_reasons"].split("|"):
@@ -55,20 +59,21 @@ def run_py_engine(rep_idx: int, runner, prompt_text: str, gen_tokens: int = 128)
                 throttles.add(r)
     throttle_str = "|".join(sorted(throttles)) if throttles else "NONE"
 
-    print(f"[Run A{rep_idx}] py-engine: total={total_time*1000.0:.2f}ms, step={avg_step_ms:.2f}ms/step, tok/s={decode_tok_s:.1f}, SM_clock={median_sm}MHz, throttle={throttle_str}")
+    print(f"[Rep {rep_idx}] py-engine: total={total_time*1000.0:.2f}ms, step={avg_step_ms:.2f}ms/step, tok/s={decode_tok_s:.1f}, SM={median_sm}MHz, Power={median_power:.1f}W, throttle={throttle_str}")
     return {
         "step_ms": avg_step_ms,
         "tok_s": decode_tok_s,
         "median_sm_mhz": median_sm,
+        "median_power_w": median_power,
         "throttle": throttle_str,
         "csv": csv_path
     }
 
-def run_llama_cpp(rep_idx: int, gen_tokens: int = 128):
-    csv_path = os.path.join(PROFILES_DIR, f"interleaved_llamacpp_rep{rep_idx}.csv")
+def run_llama_cpp(name: str, model_path: str, rep_idx: int, gen_tokens: int = 128):
+    csv_path = os.path.join(PROFILES_DIR, f"p0c_interleaved_{name}_rep{rep_idx}.csv")
     cmd = [
         LLAMA_BENCH_EXE,
-        "-m", FP16_GGUF,
+        "-m", model_path,
         "-p", "512",
         "-n", str(gen_tokens),
         "-ngl", "99",
@@ -79,18 +84,24 @@ def run_llama_cpp(rep_idx: int, gen_tokens: int = 128):
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=True)
         total_time = time.perf_counter() - t0
 
-    # Parse tg128 from output
     import re
     tg_tok_s = 0.0
+    pp_tok_s = 0.0
     for line in proc.stdout.splitlines():
         if "tg128" in line:
             m = re.search(r"tg128\s*\|\s*([0-9.]+)", line)
             if m:
                 tg_tok_s = float(m.group(1))
+        if "pp512" in line:
+            m = re.search(r"pp512\s*\|\s*([0-9.]+)", line)
+            if m:
+                pp_tok_s = float(m.group(1))
 
     step_ms = 1000.0 / tg_tok_s if tg_tok_s > 0 else 0.0
     sm_clocks = [s["sm_clock_mhz"] for s in nvml_log._samples] if nvml_log._samples else []
     median_sm = int(np.median(sm_clocks)) if sm_clocks else 0
+    powers = [s["power_w"] for s in nvml_log._samples] if nvml_log._samples else []
+    median_power = float(np.median(powers)) if powers else 0.0
     throttles = set()
     for s in nvml_log._samples:
         for r in s["throttle_reasons"].split("|"):
@@ -98,17 +109,19 @@ def run_llama_cpp(rep_idx: int, gen_tokens: int = 128):
                 throttles.add(r)
     throttle_str = "|".join(sorted(throttles)) if throttles else "NONE"
 
-    print(f"[Run B{rep_idx}] llama.cpp: tg128={tg_tok_s:.2f} tok/s ({step_ms:.2f} ms/step), SM_clock={median_sm}MHz, throttle={throttle_str}")
+    print(f"[Rep {rep_idx}] llama.cpp {name}: tg128={tg_tok_s:.2f} tok/s ({step_ms:.2f} ms/step), pp512={pp_tok_s:.1f} tok/s, SM={median_sm}MHz, Power={median_power:.1f}W, throttle={throttle_str}")
     return {
         "step_ms": step_ms,
         "tok_s": tg_tok_s,
+        "pp_tok_s": pp_tok_s,
         "median_sm_mhz": median_sm,
+        "median_power_w": median_power,
         "throttle": throttle_str,
         "csv": csv_path
     }
 
 def main():
-    print("=== Initializing py-engine for interleaved benchmark ===")
+    print("=== Initializing py-engine for extended interleaved benchmark ===")
     from engine.kernels.paged_attention_integration import KernelPagedManualDecode
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -130,41 +143,72 @@ def main():
     input_ids = (tokens * mult)[:512]
     prompt_text = tokenizer.decode(input_ids, skip_special_tokens=True)
 
-    # Warmup both
     print("Warming up py-engine...")
     _ = runner.generate("Warmup test", max_new_tokens=5)
     print("Warming up llama.cpp...")
-    subprocess.run([LLAMA_BENCH_EXE, "-m", FP16_GGUF, "-p", "64", "-n", "8", "-ngl", "99", "-r", "1"],
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    for mpath in [FP16_GGUF, Q8_0_GGUF, Q4_K_M_GGUF]:
+        subprocess.run([LLAMA_BENCH_EXE, "-m", mpath, "-p", "64", "-n", "8", "-ngl", "99", "-r", "1"],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
 
-    py_results = []
-    llama_results = []
+    results = {
+        "py_engine": [],
+        "llama_f16": [],
+        "llama_q8_0": [],
+        "llama_q4_k_m": []
+    }
 
-    print("\n=== Starting Interleaved A B A B A B Runs ===")
-    for rep in range(1, 4):
-        print(f"\n--- Iteration {rep}/3 ---")
-        # Run A: py-engine
-        res_a = run_py_engine(rep, runner, prompt_text, 128)
-        py_results.append(res_a)
-        time.sleep(2)  # Cooldown between runs
+    n_reps = 5
+    print(f"\n=== Starting Interleaved 4-Config Benchmark across {n_reps} Repetitions ===")
+    for rep in range(1, n_reps + 1):
+        print(f"\n---------------------------------------------")
+        print(f"--- Repetition {rep}/{n_reps} ---")
+        print(f"---------------------------------------------")
 
-        # Run B: llama.cpp
-        res_b = run_llama_cpp(rep, 128)
-        llama_results.append(res_b)
+        # 1. py-engine
+        r_py = run_py_engine(rep, runner, prompt_text, 128)
+        results["py_engine"].append(r_py)
         time.sleep(2)
 
-    print("\n=== Summary of Interleaved Benchmark ===")
-    print("System | Rep 1 tok/s | Rep 2 tok/s | Rep 3 tok/s | Median SM Clock | Throttling Observed")
-    print("-" * 85)
-    py_toks = [r["tok_s"] for r in py_results]
-    py_sms = [r["median_sm_mhz"] for r in py_results]
-    py_throttles = set(r["throttle"] for r in py_results)
-    print(f"py-engine | {py_toks[0]:.1f} | {py_toks[1]:.1f} | {py_toks[2]:.1f} | {int(np.median(py_sms))} MHz | {', '.join(py_throttles)}")
+        # 2. llama.cpp F16
+        r_f16 = run_llama_cpp("F16", FP16_GGUF, rep, 128)
+        results["llama_f16"].append(r_f16)
+        time.sleep(2)
 
-    ll_toks = [r["tok_s"] for r in llama_results]
-    ll_sms = [r["median_sm_mhz"] for r in llama_results]
-    ll_throttles = set(r["throttle"] for r in llama_results)
-    print(f"llama.cpp | {ll_toks[0]:.1f} | {ll_toks[1]:.1f} | {ll_toks[2]:.1f} | {int(np.median(ll_sms))} MHz | {', '.join(ll_throttles)}")
+        # 3. llama.cpp Q8_0
+        r_q8 = run_llama_cpp("Q8_0", Q8_0_GGUF, rep, 128)
+        results["llama_q8_0"].append(r_q8)
+        time.sleep(2)
+
+        # 4. llama.cpp Q4_K_M
+        r_q4 = run_llama_cpp("Q4_K_M", Q4_K_M_GGUF, rep, 128)
+        results["llama_q4_k_m"].append(r_q4)
+        time.sleep(2)
+
+    print("\n" + "="*90)
+    print("=== SUMMARY OF INTERLEAVED BENCHMARK (5 Reps) ===")
+    print("="*90)
+    print(f"{'Config':<16} | {'Median tok/s':<12} | {'Min..Max tok/s':<18} | {'Median ms':<10} | {'Median SM':<10} | {'Power (W)':<10} | {'Throttle':<15}")
+    print("-" * 90)
+
+    for cfg_key, cfg_label in [
+        ("py_engine", "py-engine"),
+        ("llama_f16", "llama.cpp F16"),
+        ("llama_q8_0", "llama.cpp Q8_0"),
+        ("llama_q4_k_m", "llama.cpp Q4_K_M")
+    ]:
+        toks = [r["tok_s"] for r in results[cfg_key]]
+        steps = [r["step_ms"] for r in results[cfg_key]]
+        sms = [r["median_sm_mhz"] for r in results[cfg_key]]
+        powers = [r["median_power_w"] for r in results[cfg_key]]
+        throttles = set(r["throttle"] for r in results[cfg_key])
+        med_tok = float(np.median(toks))
+        min_tok = min(toks)
+        max_tok = max(toks)
+        med_step = float(np.median(steps))
+        med_sm = int(np.median(sms))
+        med_pwr = float(np.median(powers))
+        thr_str = "|".join(sorted(throttles)) if throttles else "NONE"
+        print(f"{cfg_label:<16} | {med_tok:<12.2f} | [{min_tok:.1f} .. {max_tok:.1f}]      | {med_step:<10.2f} | {med_sm:<10} | {med_pwr:<10.1f} | {thr_str:<15}")
 
 if __name__ == "__main__":
     main()
