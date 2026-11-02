@@ -81,3 +81,10 @@ ctest --test-dir build --output-on-failure
 - **In-Engine Profiling Fallback**:
   - Inside our C++ inference engine, per-kernel timing is achieved directly via `cudaEventCreate` / `cudaEventRecord` / `cudaEventElapsedTime` paired with high-resolution host timestamps (`std::chrono::steady_clock`), or the CUPTI activity API (`cuptiActivityEnable`, headers in `CUPTI/include`, lib `cupti.lib`).
 
+
+- **Nsight Compute (
+cu) & Performance Counter Permissions (ERR_NVGPUCTRPERM)**:
+  - Running 
+cu without elevated permissions or without non-admin profiling enabled produces:
+    ==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters.
+  - To enable non-admin access: In NVIDIA Control Panel -> Developer -> 'Allow access to the GPU performance counters to all users' (or execute NCU commands from an Administrator prompt).
