@@ -73,9 +73,10 @@ ctest --test-dir build --output-on-failure
 ## Profiler & Tracing Guidelines
 - **Nsight Systems CLI (`nsys`)**:
   - The stock Nsight Systems (v2023.4.4 bundled with CUDA 12.4) fails on Windows 11 with driver 616.x when unprivileged due to `ReflexStatsTraceLoggingProvider` requiring elevation.
-  - Command to run in an elevated (Administrator) terminal:
+  - Command to run in an elevated (Administrator) terminal (from `C:\Computing\serving_engine`):
     ```cmd
-    "C:\Program Files\NVIDIA Corporation\Nsight Systems 2023.4.4\target-windows-x64\nsys.exe" profile -t cuda,nvtx -o docs/profiles/P3_nsys --force-overwrite true build\generate.exe --profile-step
+    cd /d C:\Computing\serving_engine
+    "C:\Program Files\NVIDIA Corporation\Nsight Systems 2023.4.4\target-windows-x64\nsys.exe" profile -t cuda,nvtx -o docs\profiles\P3_nsys --force-overwrite true C:\Computing\serving_engine\build\generate.exe --profile-step
     ```
 - **In-Engine Profiling Fallback**:
   - Inside our C++ inference engine, per-kernel timing is achieved directly via `cudaEventCreate` / `cudaEventRecord` / `cudaEventElapsedTime` paired with high-resolution host timestamps (`std::chrono::steady_clock`), or the CUPTI activity API (`cuptiActivityEnable`, headers in `CUPTI/include`, lib `cupti.lib`).
