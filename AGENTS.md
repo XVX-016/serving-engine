@@ -13,6 +13,7 @@ The goal is correct, measured, honestly reported results. Negative results are r
 - Baselines: HF eager, py-engine, llama.cpp. Numbers live in RESULTS.md.
 - config.json of the model is the source of truth for dimensions.
 - Environment details and exact build/test commands: docs/ENV.md (created by task P0).
+- Pass criteria are in docs/GATES.md; never loosen them
 
 ## Working rules
 1. Plan first. At the start of every task, write the plan, file list, tests and acceptance
