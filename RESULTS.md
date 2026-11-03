@@ -31,7 +31,11 @@
 | P5   | Custom FP16 GEMV + bias/residual fusion (P=512) | 1 | 512 | 32 | - | 12.12 | 82.5 | 996 MB | Gate 1.7 PASS | Decode 12.12 ms/step (spread [12.03, 16.46] ms; isolated 10-step median 14.48 ms). NCU linear kernel time: 3.80 ms (down from 5.00 ms cuBLAS). 5/5 reference prompts pass 32-token greedy match. Compute-sanitizer 0 errors. Intercept dropped to 5.94 ms. |
 | P5   | Custom FP16 GEMV + bias/residual fusion (P=1024) | 1 | 1024 | 32 | - | 18.23 | 54.9 | 996 MB | Gate 1.7 PASS | Decode 18.23 ms/step (spread [18.18, 25.37] ms). Throughput 54.9 tok/s. |
 | P5   | Custom FP16 GEMV + bias/residual fusion (P=2048) | 1 | 2048 | 32 | - | 30.88 | 32.4 | 996 MB | Gate 1.7 PASS | Decode 30.88 ms/step (spread [30.58, 36.39] ms). Achieved KV bandwidth 1.01 GB/s. Linear fit intercept 5.94 ms vs 4.33 ms roofline. |
-| P7   | Split-KV decode + flash prefill | 1, 32 | | | | | | | | |
+| P7   | Split-KV decode + flash prefill (Ctx 128) | 1 | 128 | 32 | 421.5 | 6.36 | 157.1 | 996 MB | Gate 1.7 PASS | Split-KV decode + Flash-style prefill. 100% greedy match on 5/5 reference prompts. Gate 1.7 passes across all 8 prompts. Decode 6.36 ms/step (down from 7.60 ms in P5). SM clock 1920 MHz. |
+| P7   | Split-KV decode + flash prefill (Ctx 512) | 1 | 512 | 32 | 1331.1 | 7.14 | 140.1 | 996 MB | Gate 1.7 PASS | Decode 7.14 ms/step (down from 12.12 ms in P5, 1.70x speedup). Prefill 1331.1 tok/s. Attention kernel isolated time 0.059 ms. SM clock 1920 MHz. |
+| P7   | Split-KV decode + flash prefill (Ctx 1024) | 1 | 1024 | 32 | 2025.5 | 8.17 | 122.3 | 996 MB | Gate 1.7 PASS | Decode 8.17 ms/step (down from 18.23 ms in P5, 2.23x speedup). Prefill 2025.5 tok/s. SM clock 1920 MHz. |
+| P7   | Split-KV decode + flash prefill (Ctx 2048) | 1 | 2048 | 32 | 1879.9 | 11.18 | 89.5 | 996 MB | Gate 1.7 PASS | Decode 11.18 ms/step (down from 30.88 ms in P5, 2.76x speedup). Attention time at Ctx 2048 reduced from 25.0 ms to 0.22 ms (>100x kernel speedup). SM clock 1920 MHz. |
+| P7   | Decode attention standalone (B=32, S=2048) | 32 | 2048 | 1 | - | 1.11 ms | - | - | - | L2 flushed, 5 warmup + 25 timed. C++ kernel: 1.11 ms (30.3 GB/s GQA-native DRAM bandwidth, 39.1 MB DRAM read per NCU, 13.3% copy BW). Py-engine Triton: 0.44 ms (81.4 GB/s expanded metric). Memory bandwidth analysis detailed in docs/reports/P7.md. |
 | P8   | INT8 and INT4 weights | 1 | | | | | | | ppl: | |
 | P9   | INT8, FP8, INT4 KV | 32 | | | | | | | ppl: | |
 | P10  | Paged KV + batching | 1, 4, 8, 16 | | | | | | | | |

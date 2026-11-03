@@ -55,6 +55,8 @@ struct ActivationBuffersGPU {
     DeviceBuffer<half> mlp_out;       // [max_seq * hidden_size]
     DeviceBuffer<float> logits;       // [max_seq * vocab_size] in FP32
     DeviceBuffer<int64_t> token_ids_d;// [max_seq]
+    DeviceBuffer<int> decode_seq_len; // [1] sequence length for decode
+    DeviceBuffer<float> split_kv_buf; // [splits * heads * head_dim]
 
     int64_t max_seq = 0;
 

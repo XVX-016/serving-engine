@@ -40,3 +40,10 @@ target_link_libraries(test_sampler PRIVATE engine CUDA::cudart CUDA::cublas)
 add_test(NAME test_sampler COMMAND test_sampler)
 set_tests_properties(test_sampler PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+add_executable(test_attention test_attention.cpp)
+target_include_directories(test_attention PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_attention PRIVATE engine CUDA::cudart CUDA::cublas)
+add_test(NAME test_attention COMMAND test_attention)
+set_tests_properties(test_attention PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+

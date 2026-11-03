@@ -29,6 +29,12 @@ target_link_libraries(generate PRIVATE engine)
 add_executable(bench_read_bandwidth apps/bench_read_bandwidth.cpp)
 target_link_libraries(bench_read_bandwidth PRIVATE engine)
 
+add_executable(bench_attention apps/bench_attention.cpp)
+target_link_libraries(bench_attention PRIVATE engine)
+
+add_executable(profile_single_step apps/profile_single_step.cpp)
+target_link_libraries(profile_single_step PRIVATE engine)
+
 add_executable(tokenize_stdin apps/tokenize_stdin.cpp)
 target_link_libraries(tokenize_stdin PRIVATE engine)
 

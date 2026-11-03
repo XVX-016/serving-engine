@@ -96,6 +96,8 @@ void ActivationBuffersGPU::allocate(const ModelConfig& config, int64_t max_seq_l
     mlp_out.allocate(max_seq * H);
     logits.allocate(max_seq * V);
     token_ids_d.allocate(max_seq);
+    decode_seq_len.allocate(1);
+    split_kv_buf.allocate(16 * 14 * (config.head_dim + 2));
 }
 
 // ---- Helper: download FP16 device to host FP32 for npy dump ----
@@ -223,10 +225,10 @@ std::vector<float> forward_gpu(
                         S, num_q_heads, num_kv_heads, head_dim, 0, config.rope_theta);
         timed_end(lp + "rope");
 
-        // 2d. Causal GQA
+        // 2d. Flash-Style Causal GQA (tiled shared memory, online softmax)
         timed_begin(lp + "attention");
-        cuda::causal_gqa(buffers.q.data(), buffers.k.data(), buffers.v.data(),
-                        buffers.attn_out.data(), S, num_q_heads, num_kv_heads, head_dim);
+        cuda::flash_prefill_gqa(buffers.q.data(), buffers.k.data(), buffers.v.data(),
+                                buffers.attn_out.data(), S, num_q_heads, num_kv_heads, head_dim);
         timed_end(lp + "attention");
 
         // 2e. Output projection: [S, H] * [H, H]^T -> [S, H]
@@ -431,10 +433,10 @@ std::vector<float> prefill_gpu(
         );
         timed_end(lp + "cache_append");
 
-        // 2d. Causal GQA
+        // 2d. Flash-Style Causal GQA (tiled shared memory, online softmax)
         timed_begin(lp + "attention");
-        cuda::causal_gqa(buffers.q.data(), buffers.k.data(), buffers.v.data(),
-                        buffers.attn_out.data(), S, num_q_heads, num_kv_heads, head_dim);
+        cuda::flash_prefill_gqa(buffers.q.data(), buffers.k.data(), buffers.v.data(),
+                                buffers.attn_out.data(), S, num_q_heads, num_kv_heads, head_dim);
         timed_end(lp + "attention");
 
         // 2e. Output projection
@@ -548,8 +550,10 @@ std::vector<float> decode_step_gpu(
         }
     };
 
-    // Upload single token ID
+    // Upload single token ID and sequence length
     buffers.token_ids_d.copy_from_host(&token_id, 1);
+    int total_tokens = current_pos + 1;
+    buffers.decode_seq_len.copy_from_host(&total_tokens, 1);
 
     // 1. Embedding lookup (M=1)
     timed_begin("embedding");
@@ -605,18 +609,34 @@ std::vector<float> decode_step_gpu(
         );
         timed_end(lp + "cache_append");
 
-        // 2d. Decode GQA attending over cache [0 .. current_pos]
+        // 2d. Decode Attention (GQA-grouped, Split-KV with KVView)
         timed_begin(lp + "decode_attention");
-        cuda::decode_gqa(
-            buffers.q.data(),
+        cuda::KVView k_view{
             kv_cache.get_head_ptr(layer_idx, 0, 0),
+            0,
+            static_cast<int64_t>(kv_cache.max_seq() * head_dim),
+            static_cast<int64_t>(head_dim),
+            1
+        };
+        cuda::KVView v_view{
             kv_cache.get_head_ptr(layer_idx, 1, 0),
+            0,
+            static_cast<int64_t>(kv_cache.max_seq() * head_dim),
+            static_cast<int64_t>(head_dim),
+            1
+        };
+        cuda::decode_gqa_split(
+            buffers.q.data(),
+            k_view,
+            v_view,
+            buffers.decode_seq_len.data(),
             buffers.attn_out.data(),
-            current_pos + 1,
+            1,
             static_cast<int>(num_q_heads),
             static_cast<int>(num_kv_heads),
-            kv_cache.max_seq(),
-            static_cast<int>(head_dim)
+            static_cast<int>(head_dim),
+            total_tokens,
+            buffers.split_kv_buf.data()
         );
         timed_end(lp + "decode_attention");
 

@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 #include <cstdint>
+#include "src/cuda/kv_view.h"
 
 namespace engine {
 namespace cuda {
@@ -110,6 +111,38 @@ void decode_gqa(
     int num_kv_heads,
     int max_seq,
     int head_dim,
+    cudaStream_t stream = 0
+);
+
+// 7c. Split-KV Decode Attention with GQA grouping and KVView abstraction:
+struct KVView;
+
+void decode_gqa_split(
+    const half* q,
+    KVView k_view,
+    KVView v_view,
+    const int* seq_lens,
+    half* out,
+    int batch_size,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    float* split_buffer = nullptr,
+    cudaStream_t stream = 0
+);
+
+// 7d. Flash-style prefill attention (tiled shared memory, online softmax):
+void flash_prefill_gqa(
+    const half* q,
+    const half* k,
+    const half* v,
+    half* out,
+    int64_t seq_len,
+    int num_q_heads,
+    int num_kv_heads,
+    int head_dim,
+    int batch_size = 1,
     cudaStream_t stream = 0
 );
 
