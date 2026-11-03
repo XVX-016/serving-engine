@@ -2,6 +2,7 @@
 
 #include "src/model/config.h"
 #include "src/common/cuda_utils.h"
+#include "src/runtime/kv_cache.h"
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 #include <vector>
@@ -76,6 +77,36 @@ std::vector<float> forward_gpu(
     ActivationBuffersGPU& buffers,
     cublasHandle_t cublas_handle,
     const std::string& dump_dir = "",
+    std::vector<KernelRecord>* profile_records = nullptr
+);
+
+// Prefill: processes token_ids, appends K/V to kv_cache starting at pos 0,
+// returns last-position logits as host float32 [vocab_size].
+// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size].
+std::vector<float> prefill_gpu(
+    const std::vector<int64_t>& token_ids,
+    const ModelConfig& config,
+    const ModelWeightsGPU& weights,
+    ActivationBuffersGPU& buffers,
+    KVCache& kv_cache,
+    cublasHandle_t cublas_handle,
+    half* d_last_logits = nullptr,
+    std::vector<KernelRecord>* profile_records = nullptr
+);
+
+// Single-token decode step:
+// Processes single token_id at current_pos, appends K/V to kv_cache,
+// returns last-position logits as host float32 [vocab_size].
+// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size].
+std::vector<float> decode_step_gpu(
+    int64_t token_id,
+    int current_pos,
+    const ModelConfig& config,
+    const ModelWeightsGPU& weights,
+    ActivationBuffersGPU& buffers,
+    KVCache& kv_cache,
+    cublasHandle_t cublas_handle,
+    half* d_last_logits = nullptr,
     std::vector<KernelRecord>* profile_records = nullptr
 );
 

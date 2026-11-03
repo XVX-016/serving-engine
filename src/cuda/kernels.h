@@ -95,6 +95,24 @@ void softmax(
     cudaStream_t stream = 0
 );
 
+// 7b. Single-token Decode Attention attending over head-major KV cache:
+// q: [num_q_heads, head_dim]
+// k_cache: [num_kv_heads, max_seq, head_dim]
+// v_cache: [num_kv_heads, max_seq, head_dim]
+// out: [num_q_heads, head_dim]
+void decode_gqa(
+    const half* q,
+    const half* k_cache,
+    const half* v_cache,
+    half* out,
+    int total_seq_len,
+    int num_q_heads,
+    int num_kv_heads,
+    int max_seq,
+    int head_dim,
+    cudaStream_t stream = 0
+);
+
 // 8. SwiGLU: out = (gate * sigmoid(gate)) * up
 // gate: [count], up: [count], out: [count]
 void swiglu(

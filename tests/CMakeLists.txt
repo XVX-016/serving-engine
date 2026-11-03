@@ -28,3 +28,15 @@ target_link_libraries(test_cuda_ops PRIVATE engine CUDA::cudart CUDA::cublas)
 add_test(NAME test_cuda_ops COMMAND test_cuda_ops)
 set_tests_properties(test_cuda_ops PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+add_executable(test_kv_cache test_kv_cache.cpp)
+target_include_directories(test_kv_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_kv_cache PRIVATE engine CUDA::cudart CUDA::cublas)
+add_test(NAME test_kv_cache COMMAND test_kv_cache)
+set_tests_properties(test_kv_cache PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(test_sampler test_sampler.cpp)
+target_include_directories(test_sampler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_sampler PRIVATE engine CUDA::cudart CUDA::cublas)
+add_test(NAME test_sampler COMMAND test_sampler)
+set_tests_properties(test_sampler PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+

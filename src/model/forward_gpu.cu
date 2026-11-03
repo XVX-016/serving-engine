@@ -328,5 +328,399 @@ std::vector<float> forward_gpu(
     return logits_f;
 }
 
+// ---- Prefill Implementation ----
+std::vector<float> prefill_gpu(
+    const std::vector<int64_t>& token_ids,
+    const ModelConfig& config,
+    const ModelWeightsGPU& weights,
+    ActivationBuffersGPU& buffers,
+    KVCache& kv_cache,
+    cublasHandle_t cublas_handle,
+    half* d_last_logits,
+    std::vector<KernelRecord>* profile_records
+) {
+    int64_t S = static_cast<int64_t>(token_ids.size());
+    int64_t H = config.hidden_size;
+    int64_t num_q_heads = config.num_attention_heads;
+    int64_t num_kv_heads = config.num_key_value_heads;
+    int64_t head_dim = config.head_dim;
+    int64_t kv_dim = num_kv_heads * head_dim;
+    int64_t inter_dim = config.intermediate_size;
+    int64_t V = config.vocab_size;
+
+    if (S > buffers.max_seq) {
+        throw std::runtime_error("prefill_gpu: seq_len " + std::to_string(S) +
+                                 " exceeds max_seq " + std::to_string(buffers.max_seq));
+    }
+
+    CudaTimer timer;
+    auto timed_begin = [&](const std::string& name) {
+        if (profile_records) timer.start();
+    };
+    auto timed_end = [&](const std::string& name) {
+        if (profile_records) {
+            timer.stop();
+            profile_records->push_back({name, timer.elapsed_ms()});
+        }
+    };
+
+    // Upload token IDs
+    buffers.token_ids_d.copy_from_host(token_ids.data(), S);
+
+    // 1. Embedding lookup
+    timed_begin("embedding");
+    cuda::embedding_lookup(buffers.token_ids_d.data(), weights.embed_tokens.data(),
+                           buffers.hidden_states.data(), S, H);
+    timed_end("embedding");
+
+    for (int layer_idx = 0; layer_idx < config.num_hidden_layers; ++layer_idx) {
+        const auto& lw = weights.layers[layer_idx];
+        std::string lp = "layer" + std::to_string(layer_idx) + ".";
+
+        // 2a. Input RMSNorm
+        timed_begin(lp + "input_rmsnorm");
+        cuda::rmsnorm(buffers.hidden_states.data(), lw.input_layernorm.data(),
+                      buffers.norm_out.data(), S, H, config.rms_norm_eps);
+        timed_end(lp + "input_rmsnorm");
+
+        // 2b. Q/K/V projections
+        timed_begin(lp + "q_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.q_proj_weight.data(), buffers.q.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(H));
+        timed_end(lp + "q_proj");
+
+        timed_begin(lp + "q_bias");
+        cuda::bias_add(buffers.q.data(), lw.q_proj_bias.data(),
+                      buffers.q.data(), S, H);
+        timed_end(lp + "q_bias");
+
+        timed_begin(lp + "k_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.k_proj_weight.data(), buffers.k.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(kv_dim));
+        timed_end(lp + "k_proj");
+
+        timed_begin(lp + "k_bias");
+        cuda::bias_add(buffers.k.data(), lw.k_proj_bias.data(),
+                      buffers.k.data(), S, kv_dim);
+        timed_end(lp + "k_bias");
+
+        timed_begin(lp + "v_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.v_proj_weight.data(), buffers.v.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(kv_dim));
+        timed_end(lp + "v_proj");
+
+        timed_begin(lp + "v_bias");
+        cuda::bias_add(buffers.v.data(), lw.v_proj_bias.data(),
+                      buffers.v.data(), S, kv_dim);
+        timed_end(lp + "v_bias");
+
+        // 2c. RoPE
+        timed_begin(lp + "rope");
+        cuda::apply_rope(buffers.q.data(), buffers.k.data(),
+                        S, num_q_heads, num_kv_heads, head_dim, 0, config.rope_theta);
+        timed_end(lp + "rope");
+
+        // Append K and V to KV Cache for this layer
+        timed_begin(lp + "cache_append");
+        cuda::append_kv_cache(
+            buffers.k.data(), buffers.v.data(),
+            kv_cache.get_head_ptr(layer_idx, 0, 0),
+            kv_cache.get_head_ptr(layer_idx, 1, 0),
+            static_cast<int>(S), 0,
+            static_cast<int>(num_kv_heads),
+            kv_cache.max_seq(),
+            static_cast<int>(head_dim)
+        );
+        timed_end(lp + "cache_append");
+
+        // 2d. Causal GQA
+        timed_begin(lp + "attention");
+        cuda::causal_gqa(buffers.q.data(), buffers.k.data(), buffers.v.data(),
+                        buffers.attn_out.data(), S, num_q_heads, num_kv_heads, head_dim);
+        timed_end(lp + "attention");
+
+        // 2e. Output projection
+        timed_begin(lp + "o_proj");
+        cuda::matmul_transB(cublas_handle, buffers.attn_out.data(),
+                           lw.o_proj_weight.data(), buffers.proj_out.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(H));
+        timed_end(lp + "o_proj");
+
+        // 2f. Residual add
+        timed_begin(lp + "attn_residual");
+        cuda::residual_add(buffers.hidden_states.data(), buffers.proj_out.data(),
+                          buffers.hidden_states.data(), S * H);
+        timed_end(lp + "attn_residual");
+
+        // 3a. Post-attention layernorm
+        timed_begin(lp + "post_rmsnorm");
+        cuda::rmsnorm(buffers.hidden_states.data(), lw.post_attention_layernorm.data(),
+                      buffers.norm_out.data(), S, H, config.rms_norm_eps);
+        timed_end(lp + "post_rmsnorm");
+
+        // 3b. Gate & Up proj
+        timed_begin(lp + "gate_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.gate_proj_weight.data(), buffers.gate.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(inter_dim));
+        timed_end(lp + "gate_proj");
+
+        timed_begin(lp + "up_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.up_proj_weight.data(), buffers.up.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(inter_dim));
+        timed_end(lp + "up_proj");
+
+        // 3c. SwiGLU
+        timed_begin(lp + "swiglu");
+        cuda::swiglu(buffers.gate.data(), buffers.up.data(),
+                    buffers.act.data(), S * inter_dim);
+        timed_end(lp + "swiglu");
+
+        // 3d. Down projection
+        timed_begin(lp + "down_proj");
+        cuda::matmul_transB(cublas_handle, buffers.act.data(),
+                           lw.down_proj_weight.data(), buffers.mlp_out.data(),
+                           static_cast<int>(S), static_cast<int>(inter_dim), static_cast<int>(H));
+        timed_end(lp + "down_proj");
+
+        // 3e. Residual add
+        timed_begin(lp + "mlp_residual");
+        cuda::residual_add(buffers.hidden_states.data(), buffers.mlp_out.data(),
+                          buffers.hidden_states.data(), S * H);
+        timed_end(lp + "mlp_residual");
+    }
+
+    kv_cache.set_current_seq_len(static_cast<int>(S));
+
+    // 4. Final RMSNorm on LAST position only
+    const half* last_hidden = buffers.hidden_states.data() + (S - 1) * H;
+    half* last_norm = buffers.norm_out.data(); // reuse norm_out[0..H-1]
+    timed_begin("final_rmsnorm");
+    cuda::rmsnorm(last_hidden, weights.final_norm.data(),
+                  last_norm, 1, H, config.rms_norm_eps);
+    timed_end("final_rmsnorm");
+
+    // 5. LM Head on last position only: [1, H] * [V, H]^T -> [1, V]
+    half* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
+    timed_begin("lm_head");
+    cuda::matmul_transB(cublas_handle, last_norm,
+                       weights.embed_tokens.data(), target_logits,
+                       1, static_cast<int>(H), static_cast<int>(V));
+    timed_end("lm_head");
+
+    // Download only last-position logits (1 * V)
+    std::vector<half> logits_h(V);
+    CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
+               V * sizeof(half), cudaMemcpyDeviceToHost));
+
+    std::vector<float> logits_f(V);
+    for (int64_t i = 0; i < V; ++i) {
+        logits_f[i] = __half2float(logits_h[i]);
+    }
+    return logits_f;
+}
+
+// ---- Decode Step Implementation ----
+std::vector<float> decode_step_gpu(
+    int64_t token_id,
+    int current_pos,
+    const ModelConfig& config,
+    const ModelWeightsGPU& weights,
+    ActivationBuffersGPU& buffers,
+    KVCache& kv_cache,
+    cublasHandle_t cublas_handle,
+    half* d_last_logits,
+    std::vector<KernelRecord>* profile_records
+) {
+    int64_t H = config.hidden_size;
+    int64_t num_q_heads = config.num_attention_heads;
+    int64_t num_kv_heads = config.num_key_value_heads;
+    int64_t head_dim = config.head_dim;
+    int64_t kv_dim = num_kv_heads * head_dim;
+    int64_t inter_dim = config.intermediate_size;
+    int64_t V = config.vocab_size;
+
+    CudaTimer timer;
+    auto timed_begin = [&](const std::string& name) {
+        if (profile_records) timer.start();
+    };
+    auto timed_end = [&](const std::string& name) {
+        if (profile_records) {
+            timer.stop();
+            profile_records->push_back({name, timer.elapsed_ms()});
+        }
+    };
+
+    // Upload single token ID
+    buffers.token_ids_d.copy_from_host(&token_id, 1);
+
+    // 1. Embedding lookup (M=1)
+    timed_begin("embedding");
+    cuda::embedding_lookup(buffers.token_ids_d.data(), weights.embed_tokens.data(),
+                           buffers.hidden_states.data(), 1, H);
+    timed_end("embedding");
+
+    for (int layer_idx = 0; layer_idx < config.num_hidden_layers; ++layer_idx) {
+        const auto& lw = weights.layers[layer_idx];
+        std::string lp = "layer" + std::to_string(layer_idx) + ".";
+
+        // 2a. Input RMSNorm (M=1)
+        timed_begin(lp + "input_rmsnorm");
+        cuda::rmsnorm(buffers.hidden_states.data(), lw.input_layernorm.data(),
+                      buffers.norm_out.data(), 1, H, config.rms_norm_eps);
+        timed_end(lp + "input_rmsnorm");
+
+        // 2b. Q/K/V projections (M=1)
+        timed_begin(lp + "q_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.q_proj_weight.data(), buffers.q.data(),
+                           1, static_cast<int>(H), static_cast<int>(H));
+        timed_end(lp + "q_proj");
+
+        timed_begin(lp + "q_bias");
+        cuda::bias_add(buffers.q.data(), lw.q_proj_bias.data(),
+                      buffers.q.data(), 1, H);
+        timed_end(lp + "q_bias");
+
+        timed_begin(lp + "k_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.k_proj_weight.data(), buffers.k.data(),
+                           1, static_cast<int>(H), static_cast<int>(kv_dim));
+        timed_end(lp + "k_proj");
+
+        timed_begin(lp + "k_bias");
+        cuda::bias_add(buffers.k.data(), lw.k_proj_bias.data(),
+                      buffers.k.data(), 1, kv_dim);
+        timed_end(lp + "k_bias");
+
+        timed_begin(lp + "v_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.v_proj_weight.data(), buffers.v.data(),
+                           1, static_cast<int>(H), static_cast<int>(kv_dim));
+        timed_end(lp + "v_proj");
+
+        timed_begin(lp + "v_bias");
+        cuda::bias_add(buffers.v.data(), lw.v_proj_bias.data(),
+                      buffers.v.data(), 1, kv_dim);
+        timed_end(lp + "v_bias");
+
+        // 2c. RoPE with absolute position current_pos
+        timed_begin(lp + "rope");
+        cuda::apply_rope(buffers.q.data(), buffers.k.data(),
+                        1, num_q_heads, num_kv_heads, head_dim, current_pos, config.rope_theta);
+        timed_end(lp + "rope");
+
+        // Append single key and value to cache at current_pos
+        timed_begin(lp + "cache_append");
+        cuda::append_kv_cache(
+            buffers.k.data(), buffers.v.data(),
+            kv_cache.get_head_ptr(layer_idx, 0, 0),
+            kv_cache.get_head_ptr(layer_idx, 1, 0),
+            1, current_pos,
+            static_cast<int>(num_kv_heads),
+            kv_cache.max_seq(),
+            static_cast<int>(head_dim)
+        );
+        timed_end(lp + "cache_append");
+
+        // 2d. Decode GQA attending over cache [0 .. current_pos]
+        timed_begin(lp + "decode_attention");
+        cuda::decode_gqa(
+            buffers.q.data(),
+            kv_cache.get_head_ptr(layer_idx, 0, 0),
+            kv_cache.get_head_ptr(layer_idx, 1, 0),
+            buffers.attn_out.data(),
+            current_pos + 1,
+            static_cast<int>(num_q_heads),
+            static_cast<int>(num_kv_heads),
+            kv_cache.max_seq(),
+            static_cast<int>(head_dim)
+        );
+        timed_end(lp + "decode_attention");
+
+        // 2e. Output projection (M=1)
+        timed_begin(lp + "o_proj");
+        cuda::matmul_transB(cublas_handle, buffers.attn_out.data(),
+                           lw.o_proj_weight.data(), buffers.proj_out.data(),
+                           1, static_cast<int>(H), static_cast<int>(H));
+        timed_end(lp + "o_proj");
+
+        // 2f. Residual add
+        timed_begin(lp + "attn_residual");
+        cuda::residual_add(buffers.hidden_states.data(), buffers.proj_out.data(),
+                          buffers.hidden_states.data(), H);
+        timed_end(lp + "attn_residual");
+
+        // 3a. Post-attention RMSNorm
+        timed_begin(lp + "post_rmsnorm");
+        cuda::rmsnorm(buffers.hidden_states.data(), lw.post_attention_layernorm.data(),
+                      buffers.norm_out.data(), 1, H, config.rms_norm_eps);
+        timed_end(lp + "post_rmsnorm");
+
+        // 3b. Gate & Up projections (M=1)
+        timed_begin(lp + "gate_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.gate_proj_weight.data(), buffers.gate.data(),
+                           1, static_cast<int>(H), static_cast<int>(inter_dim));
+        timed_end(lp + "gate_proj");
+
+        timed_begin(lp + "up_proj");
+        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                           lw.up_proj_weight.data(), buffers.up.data(),
+                           1, static_cast<int>(H), static_cast<int>(inter_dim));
+        timed_end(lp + "up_proj");
+
+        // 3c. SwiGLU
+        timed_begin(lp + "swiglu");
+        cuda::swiglu(buffers.gate.data(), buffers.up.data(),
+                    buffers.act.data(), inter_dim);
+        timed_end(lp + "swiglu");
+
+        // 3d. Down projection
+        timed_begin(lp + "down_proj");
+        cuda::matmul_transB(cublas_handle, buffers.act.data(),
+                           lw.down_proj_weight.data(), buffers.mlp_out.data(),
+                           1, static_cast<int>(inter_dim), static_cast<int>(H));
+        timed_end(lp + "down_proj");
+
+        // 3e. Residual add
+        timed_begin(lp + "mlp_residual");
+        cuda::residual_add(buffers.hidden_states.data(), buffers.mlp_out.data(),
+                          buffers.hidden_states.data(), H);
+        timed_end(lp + "mlp_residual");
+    }
+
+    kv_cache.set_current_seq_len(current_pos + 1);
+
+    // 4. Final RMSNorm
+    timed_begin("final_rmsnorm");
+    cuda::rmsnorm(buffers.hidden_states.data(), weights.final_norm.data(),
+                  buffers.norm_out.data(), 1, H, config.rms_norm_eps);
+    timed_end("final_rmsnorm");
+
+    // 5. LM Head: [1, H] * [V, H]^T -> [1, V]
+    half* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
+    timed_begin("lm_head");
+    cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
+                       weights.embed_tokens.data(), target_logits,
+                       1, static_cast<int>(H), static_cast<int>(V));
+    timed_end("lm_head");
+
+    // Download only last-position logits (1 * V)
+    std::vector<half> logits_h(V);
+    CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
+               V * sizeof(half), cudaMemcpyDeviceToHost));
+
+    std::vector<float> logits_f(V);
+    for (int64_t i = 0; i < V; ++i) {
+        logits_f[i] = __half2float(logits_h[i]);
+    }
+    return logits_f;
+}
+
 } // namespace engine
 
