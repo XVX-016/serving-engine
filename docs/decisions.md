@@ -19,10 +19,10 @@ The contiguous KV cache is allocated per sequence with the layout:
 The LM head projection operates on FP16 activations and FP16 tied embedding weights using `cublasGemmEx` with FP32 accumulation (`CUDA_R_32F`). Logits returned to host and processed by the sampler are represented in FP32 (or FP16 on device during fused sampling).
 
 ### Justification:
-- Qwen2.5-0.5B-Instruct has a vocabulary of 151,936 tokens.
+- Qwen2.5-0.5B-Instruct has a model output vocabulary dimension of 151,936 tokens (padded from the tokenizer's 151,665 tokens up to the nearest multiple of 64 for optimal tensor core alignment).
 - Softmax and temperature scaling on 151,936 logits require high numerical dynamic range to avoid underflow/overflow during exponentiation.
-- FP32 accumulation in cuBLAS prevents catastrophic cancellation across the large hidden dimension ($H=896$).
-- Unpadded/padded vocabulary: The model's true vocabulary size is 151,936. Any token indices $\ge 151,936$ (or unused padding tokens up to power-of-two boundaries) are strictly masked out ($-\infty$) before softmax and sampling.
+- FP32 accumulation in cuBLAS (`CUBLAS_COMPUTE_32F`) prevents catastrophic cancellation across the large hidden dimension ($H=896$).
+- Unpadded/padded vocabulary: The tokenizer's valid token vocabulary ends at token ID 151,664 (size = 151,665). Any token indices from 151,665 up to 151,935 are padding entries. In the sampler, these indices are strictly masked to $-\infty$ (and excluded from argmax reduction) so they can never be sampled or generated.
 
 ---
 

@@ -140,23 +140,36 @@ TEST_CASE("Sampler GPU: Statistical test (100k draws within 3-sigma)") {
     }
 }
 
-TEST_CASE("Sampler GPU: Padded vocabulary IDs (>= vocab_size) are strictly masked") {
+TEST_CASE("Sampler GPU: Padded vocabulary IDs (>= 151,665) are strictly masked") {
     const int vocab_size = 151936;
+    const int real_vocab_size = 151665;
     SamplerGPU sampler(vocab_size);
 
     std::vector<float> logits(vocab_size, -10.0f);
-    // Put highest values at last valid token
-    logits[vocab_size - 1] = 50.0f;
+    // Put highest values in the padding region [151,665 .. 151,935]
+    for (int i = real_vocab_size; i < vocab_size; ++i) {
+        logits[i] = 1000.0f; // Giant logits in padding zone
+    }
+    // Valid tokens have modest logit
+    logits[100] = 5.0f;
+    logits[200] = 4.0f;
 
     SamplerConfig cfg;
     cfg.temperature = 1.0f;
     cfg.top_k = 10;
     cfg.seed = 12345;
 
+    // Sampling with temperature must NEVER sample any padded token ID
     for (int i = 0; i < 100; ++i) {
         int sampled = sampler.sample_from_float_host(logits.data(), {}, cfg);
         CHECK(sampled >= 0);
-        CHECK(sampled < vocab_size);
+        CHECK(sampled < real_vocab_size);
     }
+
+    // Argmax (temperature 0) must also NEVER return a padded token ID
+    cfg.temperature = 0.0f;
+    int argmax_tok = sampler.sample_from_float_host(logits.data(), {}, cfg);
+    CHECK(argmax_tok == 100);
+    CHECK(argmax_tok < real_vocab_size);
 }
 

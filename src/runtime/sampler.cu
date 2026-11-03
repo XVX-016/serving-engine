@@ -169,12 +169,15 @@ int SamplerGPU::sample(
     }
 
     // Temperature 0 -> Pure Argmax on GPU
+    // Constrain search space to real vocabulary [0 .. 151,664] to exclude padded IDs [151,665 .. 151,935]
     if (config.temperature <= 1e-6f) {
         int threads = 256;
         size_t smem = threads * (sizeof(float) + sizeof(int));
+        const int REAL_VOCAB_SIZE = 151665;
+        int active_vocab = (vocab_size_ > REAL_VOCAB_SIZE) ? REAL_VOCAB_SIZE : vocab_size_;
         argmax_kernel<<<1, threads, smem, stream>>>(
             d_penalized_logits_.data(),
-            vocab_size_,
+            active_vocab,
             d_sampled_token_.data()
         );
         int out_tok = 0;
@@ -188,6 +191,16 @@ int SamplerGPU::sample(
     CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_penalized_logits_.data(),
                vocab_size_ * sizeof(half), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Mask padding token IDs: Qwen2.5 tokenizer vocabulary has 151,665 tokens [0 .. 151,664].
+    // Model output logits buffer has 151,936 entries (padded to multiple of 64).
+    // Mask all indices from 151,665 to vocab_size_ - 1 to -infinity so they are never sampled.
+    const int REAL_VOCAB_SIZE = 151665;
+    if (vocab_size_ > REAL_VOCAB_SIZE) {
+        for (int i = REAL_VOCAB_SIZE; i < vocab_size_; ++i) {
+            h_logits[i] = __float2half(-1e9f);
+        }
+    }
 
     int K = config.top_k;
     if (K <= 0 || K > max_top_k_) {

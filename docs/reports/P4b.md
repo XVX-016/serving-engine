@@ -184,3 +184,4 @@ Because host enqueue is strictly faster than GPU execution, GPU queues never dra
 - **Decomposition**: Intercept is 6.97 ms (weight memory ceiling 4.33 ms); slope is 17.53 $\mu$s/tok (attention bandwidth is 0.70 GB/s, a $326\times$ gap to peak).
 - **Gate 1.7 definition**: $\le 1.5\times$ relative error vs CPU FP32 reference and 100% top-1 match (or $<0.05$ margin tie). All 8 prompts pass cleanly.
 - **Sampler status**: Padded token masking ($\ge 151,936 \to -\infty$) is tested and active. Sampling remains host-assisted and must be ported to GPU before P10/P11.
+
