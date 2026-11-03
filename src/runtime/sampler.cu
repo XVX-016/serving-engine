@@ -9,7 +9,70 @@ namespace engine {
 
 namespace {
 
-// Repetition penalty kernel on GPU
+// Repetition penalty kernel on GPU (FP32)
+__global__ void apply_repetition_penalty_kernel_f32(
+    float* __restrict__ logits,
+    const int64_t* __restrict__ history,
+    int history_len,
+    int vocab_size,
+    float penalty
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= history_len) return;
+
+    int64_t token = history[idx];
+    if (token >= 0 && token < vocab_size) {
+        float l = logits[token];
+        if (l > 0.0f) {
+            l /= penalty;
+        } else {
+            l *= penalty;
+        }
+        logits[token] = l;
+    }
+}
+
+// Argmax reduction kernel across vocab_size (FP32)
+__global__ void argmax_kernel_f32(
+    const float* __restrict__ logits,
+    int vocab_size,
+    int* __restrict__ best_idx_out
+) {
+    extern __shared__ float s_max_val[];
+    int* s_max_idx = reinterpret_cast<int*>(s_max_val + blockDim.x);
+
+    int tid = threadIdx.x;
+    float local_max = -1e30f;
+    int local_idx = -1;
+
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float val = logits[i];
+        if (val > local_max) {
+            local_max = val;
+            local_idx = i;
+        }
+    }
+
+    s_max_val[tid] = local_max;
+    s_max_idx[tid] = local_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            if (s_max_val[tid + stride] > s_max_val[tid]) {
+                s_max_val[tid] = s_max_val[tid + stride];
+                s_max_idx[tid] = s_max_idx[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *best_idx_out = s_max_idx[0];
+    }
+}
+
+// Repetition penalty kernel on GPU (FP16 legacy)
 __global__ void apply_repetition_penalty_kernel(
     half* __restrict__ logits,
     const int64_t* __restrict__ history,
@@ -32,7 +95,7 @@ __global__ void apply_repetition_penalty_kernel(
     }
 }
 
-// Argmax reduction kernel across vocab_size
+// Argmax reduction kernel across vocab_size (FP16 legacy)
 __global__ void argmax_kernel(
     const half* __restrict__ logits,
     int vocab_size,
@@ -137,7 +200,7 @@ void SamplerGPU::init(int vocab_size, int max_top_k) {
 }
 
 int SamplerGPU::sample(
-    const half* d_logits,
+    const float* d_logits,
     const std::vector<int64_t>& history,
     const SamplerConfig& config,
     cudaStream_t stream
@@ -145,7 +208,7 @@ int SamplerGPU::sample(
     // Copy logits to temp buffer
     CUDA_CHECK(cudaMemcpyAsync(
         d_penalized_logits_.data(), d_logits,
-        vocab_size_ * sizeof(half),
+        vocab_size_ * sizeof(float),
         cudaMemcpyDeviceToDevice, stream
     ));
 
@@ -159,7 +222,7 @@ int SamplerGPU::sample(
 
         int threads = 128;
         int blocks = (hist_len + threads - 1) / threads;
-        apply_repetition_penalty_kernel<<<blocks, threads, 0, stream>>>(
+        apply_repetition_penalty_kernel_f32<<<blocks, threads, 0, stream>>>(
             d_penalized_logits_.data(),
             d_history_.data(),
             hist_len,
@@ -175,7 +238,7 @@ int SamplerGPU::sample(
         size_t smem = threads * (sizeof(float) + sizeof(int));
         const int REAL_VOCAB_SIZE = 151665;
         int active_vocab = (vocab_size_ > REAL_VOCAB_SIZE) ? REAL_VOCAB_SIZE : vocab_size_;
-        argmax_kernel<<<1, threads, smem, stream>>>(
+        argmax_kernel_f32<<<1, threads, smem, stream>>>(
             d_penalized_logits_.data(),
             active_vocab,
             d_sampled_token_.data()
@@ -187,9 +250,9 @@ int SamplerGPU::sample(
 
     // Top-K selection on host using partial sort (std::nth_element)
     // std::nth_element is O(V) and runs in ~0.2ms on host, completely avoiding full sort O(V log V)
-    std::vector<half> h_logits(vocab_size_);
+    std::vector<float> h_logits(vocab_size_);
     CUDA_CHECK(cudaMemcpyAsync(h_logits.data(), d_penalized_logits_.data(),
-               vocab_size_ * sizeof(half), cudaMemcpyDeviceToHost, stream));
+               vocab_size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Mask padding token IDs: Qwen2.5 tokenizer vocabulary has 151,665 tokens [0 .. 151,664].
@@ -198,7 +261,7 @@ int SamplerGPU::sample(
     const int REAL_VOCAB_SIZE = 151665;
     if (vocab_size_ > REAL_VOCAB_SIZE) {
         for (int i = REAL_VOCAB_SIZE; i < vocab_size_; ++i) {
-            h_logits[i] = __float2half(-1e9f);
+            h_logits[i] = -1e9f;
         }
     }
 
@@ -209,28 +272,27 @@ int SamplerGPU::sample(
     if (K > vocab_size_) K = vocab_size_;
 
     // Extract top K indices using partial sort
-    // Mask any padded vocabulary IDs (indices >= vocab_size_)
     std::vector<int> indices(vocab_size_);
     for (int i = 0; i < vocab_size_; ++i) indices[i] = i;
 
     std::nth_element(indices.begin(), indices.begin() + K, indices.end(),
         [&](int a, int b) {
-            return __half2float(h_logits[a]) > __half2float(h_logits[b]);
+            return h_logits[a] > h_logits[b];
         }
     );
 
     std::sort(indices.begin(), indices.begin() + K,
         [&](int a, int b) {
-            return __half2float(h_logits[a]) > __half2float(h_logits[b]);
+            return h_logits[a] > h_logits[b];
         }
     );
 
     // Apply temperature and softmax to top-K
-    float max_v = __half2float(h_logits[indices[0]]) / config.temperature;
+    float max_v = h_logits[indices[0]] / config.temperature;
     std::vector<float> probs(K);
     float sum_exp = 0.0f;
     for (int i = 0; i < K; ++i) {
-        float val = __half2float(h_logits[indices[i]]) / config.temperature;
+        float val = h_logits[indices[i]] / config.temperature;
         float e = std::exp(val - max_v);
         probs[i] = e;
         sum_exp += e;
@@ -277,16 +339,27 @@ int SamplerGPU::sample(
     return indices[selected];
 }
 
+int SamplerGPU::sample_half(
+    const half* d_logits,
+    const std::vector<int64_t>& history,
+    const SamplerConfig& config,
+    cudaStream_t stream
+) {
+    std::vector<half> h_logits_half(vocab_size_);
+    CUDA_CHECK(cudaMemcpyAsync(h_logits_half.data(), d_logits,
+               vocab_size_ * sizeof(half), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    std::vector<float> h_logits_f(vocab_size_);
+    for (int i = 0; i < vocab_size_; ++i) h_logits_f[i] = __half2float(h_logits_half[i]);
+    return sample_from_float_host(h_logits_f.data(), history, config);
+}
+
 int SamplerGPU::sample_from_float_host(
     const float* h_logits,
     const std::vector<int64_t>& history,
     const SamplerConfig& config
 ) {
-    std::vector<half> h_half(vocab_size_);
-    for (int i = 0; i < vocab_size_; ++i) {
-        h_half[i] = __float2half(h_logits[i]);
-    }
-    d_penalized_logits_.copy_from_host(h_half.data(), vocab_size_);
+    d_penalized_logits_.copy_from_host(h_logits, vocab_size_);
     return sample(d_penalized_logits_.data(), history, config);
 }
 

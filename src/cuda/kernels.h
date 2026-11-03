@@ -138,6 +138,19 @@ void matmul_transB(
     int N
 );
 
+// 9b. cuBLAS Linear Projection to FP32 output: C = A * B^T
+// A is [M, K] in FP16, B is [N, K] in FP16, C is [M, N] in FP32
+// Uses cublasGemmEx with FP16 input, FP32 accumulate, FP32 output (CUDA_R_32F)
+void matmul_transB_f32(
+    cublasHandle_t handle,
+    const half* A,
+    const half* B,
+    float* C,
+    int M,
+    int K,
+    int N
+);
+
 } // namespace cuda
 } // namespace engine
 

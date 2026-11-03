@@ -23,9 +23,17 @@ public:
     void init(int vocab_size, int max_top_k = 1024);
 
     // Sample next token ID from raw logits on device.
-    // logits: device pointer [vocab_size]
+    // logits: device pointer [vocab_size] in FP32
     // history: host vector of previously generated token IDs (for repetition penalty)
     int sample(
+        const float* d_logits,
+        const std::vector<int64_t>& history,
+        const SamplerConfig& config,
+        cudaStream_t stream = 0
+    );
+
+    // Legacy/FP16 overload if needed
+    int sample_half(
         const half* d_logits,
         const std::vector<int64_t>& history,
         const SamplerConfig& config,
@@ -46,7 +54,7 @@ private:
     uint64_t rng_state_ = 0;
 
     // GPU workspace buffers
-    DeviceBuffer<half> d_penalized_logits_; // [vocab_size]
+    DeviceBuffer<float> d_penalized_logits_; // [vocab_size] in FP32
     DeviceBuffer<int64_t> d_history_;       // [history_len]
     DeviceBuffer<float> d_block_topk_val_;  // [num_blocks * max_top_k]
     DeviceBuffer<int> d_block_topk_idx_;    // [num_blocks * max_top_k]

@@ -49,6 +49,35 @@ void matmul_transB(
     ));
 }
 
+void matmul_transB_f32(
+    cublasHandle_t handle,
+    const half* A,
+    const half* B,
+    float* C,
+    int M,
+    int K,
+    int N
+) {
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    CUBLAS_CHECK(cublasGemmEx(
+        handle,
+        CUBLAS_OP_T,       // transpose B
+        CUBLAS_OP_N,       // normal A
+        N,                 // m for column-major result
+        M,                 // n for column-major result
+        K,                 // k for column-major inner dim
+        &alpha,
+        B, CUDA_R_16F, K,  // B_col is [K, N], transposed gives [N, K], ldb = K
+        A, CUDA_R_16F, K,  // A_col is [K, M], not transposed gives [K, M], lda = K
+        &beta,
+        C, CUDA_R_32F, N,  // C_col is [N, M] in FP32, ldc = N
+        CUBLAS_COMPUTE_32F,// FP32 accumulation
+        CUBLAS_GEMM_DEFAULT
+    ));
+}
+
 } // namespace cuda
 } // namespace engine
 

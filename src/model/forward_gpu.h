@@ -53,7 +53,7 @@ struct ActivationBuffersGPU {
     DeviceBuffer<half> up;            // [max_seq * intermediate_size]
     DeviceBuffer<half> act;           // [max_seq * intermediate_size]
     DeviceBuffer<half> mlp_out;       // [max_seq * hidden_size]
-    DeviceBuffer<half> logits;        // [max_seq * vocab_size]
+    DeviceBuffer<float> logits;       // [max_seq * vocab_size] in FP32
     DeviceBuffer<int64_t> token_ids_d;// [max_seq]
 
     int64_t max_seq = 0;
@@ -82,7 +82,7 @@ std::vector<float> forward_gpu(
 
 // Prefill: processes token_ids, appends K/V to kv_cache starting at pos 0,
 // returns last-position logits as host float32 [vocab_size].
-// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size].
+// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size] in FP32.
 std::vector<float> prefill_gpu(
     const std::vector<int64_t>& token_ids,
     const ModelConfig& config,
@@ -90,14 +90,14 @@ std::vector<float> prefill_gpu(
     ActivationBuffersGPU& buffers,
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
-    half* d_last_logits = nullptr,
+    float* d_last_logits = nullptr,
     std::vector<KernelRecord>* profile_records = nullptr
 );
 
 // Single-token decode step:
 // Processes single token_id at current_pos, appends K/V to kv_cache,
 // returns last-position logits as host float32 [vocab_size].
-// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size].
+// d_last_logits: optional device buffer pointer to receive logits on device [vocab_size] in FP32.
 std::vector<float> decode_step_gpu(
     int64_t token_id,
     int current_pos,
@@ -106,7 +106,7 @@ std::vector<float> decode_step_gpu(
     ActivationBuffersGPU& buffers,
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
-    half* d_last_logits = nullptr,
+    float* d_last_logits = nullptr,
     std::vector<KernelRecord>* profile_records = nullptr
 );
 

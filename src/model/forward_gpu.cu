@@ -304,22 +304,17 @@ std::vector<float> forward_gpu(
     }
 
     // 5. LM Head: logits = norm_out * embed_tokens^T (tied weights)
-    // [S, H] * [V, H]^T -> [S, V]
+    // [S, H] * [V, H]^T -> [S, V] in FP32
     timed_begin("lm_head");
-    cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                       weights.embed_tokens.data(), buffers.logits.data(),
-                       static_cast<int>(S), static_cast<int>(H), static_cast<int>(V));
+    cuda::matmul_transB_f32(cublas_handle, buffers.norm_out.data(),
+                           weights.embed_tokens.data(), buffers.logits.data(),
+                           static_cast<int>(S), static_cast<int>(H), static_cast<int>(V));
     timed_end("lm_head");
 
     // Download logits to host as FP32
-    std::vector<half> logits_h(S * V);
-    CUDA_CHECK(cudaMemcpy(logits_h.data(), buffers.logits.data(),
-               S * V * sizeof(half), cudaMemcpyDeviceToHost));
-
     std::vector<float> logits_f(S * V);
-    for (int64_t i = 0; i < S * V; ++i) {
-        logits_f[i] = __half2float(logits_h[i]);
-    }
+    CUDA_CHECK(cudaMemcpy(logits_f.data(), buffers.logits.data(),
+               S * V * sizeof(float), cudaMemcpyDeviceToHost));
 
     if (do_dump) {
         NpyWriter::write_f32(dump_dir + "/logits.npy", logits_f.data(), {1, S, V});
@@ -336,7 +331,7 @@ std::vector<float> prefill_gpu(
     ActivationBuffersGPU& buffers,
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
-    half* d_last_logits,
+    float* d_last_logits,
     std::vector<KernelRecord>* profile_records
 ) {
     int64_t S = static_cast<int64_t>(token_ids.size());
@@ -504,25 +499,20 @@ std::vector<float> prefill_gpu(
                   last_norm, 1, H, config.rms_norm_eps);
     timed_end("final_rmsnorm");
 
-    // 5. LM Head on last position only: [1, H] * [V, H]^T -> [1, V]
-    half* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
+    // 5. LM Head on last position only: [1, H] * [V, H]^T -> [1, V] in FP32
+    float* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
     timed_begin("lm_head");
-    cuda::matmul_transB(cublas_handle, last_norm,
-                       weights.embed_tokens.data(), target_logits,
-                       1, static_cast<int>(H), static_cast<int>(V));
+    cuda::matmul_transB_f32(cublas_handle, last_norm,
+                           weights.embed_tokens.data(), target_logits,
+                           1, static_cast<int>(H), static_cast<int>(V));
     timed_end("lm_head");
 
     // Download only last-position logits (1 * V) if requested (skip when d_last_logits provided for async pipeline)
     std::vector<float> logits_f;
     if (!d_last_logits) {
-        std::vector<half> logits_h(V);
-        CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
-                   V * sizeof(half), cudaMemcpyDeviceToHost));
-
         logits_f.resize(V);
-        for (int64_t i = 0; i < V; ++i) {
-            logits_f[i] = __half2float(logits_h[i]);
-        }
+        CUDA_CHECK(cudaMemcpy(logits_f.data(), target_logits,
+                   V * sizeof(float), cudaMemcpyDeviceToHost));
     }
     return logits_f;
 }
@@ -536,7 +526,7 @@ std::vector<float> decode_step_gpu(
     ActivationBuffersGPU& buffers,
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
-    half* d_last_logits,
+    float* d_last_logits,
     std::vector<KernelRecord>* profile_records
 ) {
     int64_t H = config.hidden_size;
@@ -705,25 +695,20 @@ std::vector<float> decode_step_gpu(
                   buffers.norm_out.data(), 1, H, config.rms_norm_eps);
     timed_end("final_rmsnorm");
 
-    // 5. LM Head: [1, H] * [V, H]^T -> [1, V]
-    half* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
+    // 5. LM Head: [1, H] * [V, H]^T -> [1, V] in FP32
+    float* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
     timed_begin("lm_head");
-    cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                       weights.embed_tokens.data(), target_logits,
-                       1, static_cast<int>(H), static_cast<int>(V));
+    cuda::matmul_transB_f32(cublas_handle, buffers.norm_out.data(),
+                           weights.embed_tokens.data(), target_logits,
+                           1, static_cast<int>(H), static_cast<int>(V));
     timed_end("lm_head");
 
     // Download only last-position logits (1 * V) if requested (skip when d_last_logits provided for async pipeline)
     std::vector<float> logits_f;
     if (!d_last_logits) {
-        std::vector<half> logits_h(V);
-        CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
-                   V * sizeof(half), cudaMemcpyDeviceToHost));
-
         logits_f.resize(V);
-        for (int64_t i = 0; i < V; ++i) {
-            logits_f[i] = __half2float(logits_h[i]);
-        }
+        CUDA_CHECK(cudaMemcpy(logits_f.data(), target_logits,
+                   V * sizeof(float), cudaMemcpyDeviceToHost));
     }
     return logits_f;
 }
