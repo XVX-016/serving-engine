@@ -476,3 +476,52 @@ TEST_CASE("CUDA Kernel Test: cuBLAS matmul_transB (20+ random shapes)") {
 
     cublasDestroy(handle);
 }
+
+TEST_CASE("CUDA Kernel Test: cuBLAS matmul_transB_f32 (25 random shapes)") {
+    std::mt19937 rng(51);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
+    // Stated tolerance: cuBLAS FP16 in / FP32 accumulate / FP32 out vs CPU FP32 reference <= 2e-4
+    const float tolerance = 2e-4f;
+
+    for (int test_idx = 0; test_idx < 25; ++test_idx) {
+        int M = (test_idx == 0) ? 1 : (1 + rng() % 33);
+        int K = 1 + rng() % 65;
+        int N = 1 + rng() % 49;
+
+        std::vector<float> A_f(M * K);
+        std::vector<float> B_f(N * K);
+        for (auto& val : A_f) val = dist(rng);
+        for (auto& val : B_f) val = dist(rng);
+
+        std::vector<half> A_h = to_half(A_f);
+        std::vector<half> B_h = to_half(B_f);
+
+        // CPU reference: C = A * B^T with full FP32 output precision
+        std::vector<float> A_h_f = to_float(A_h);
+        std::vector<float> B_h_f = to_float(B_h);
+        std::vector<float> ref_C_f(M * N);
+        cpu::matmul_transB_naive(A_h_f.data(), B_h_f.data(), ref_C_f.data(), M, K, N);
+
+        DeviceBuffer<half> d_A(M * K);
+        DeviceBuffer<half> d_B(N * K);
+        DeviceBuffer<float> d_C(M * N);
+
+        d_A.copy_from_host(A_h.data(), M * K);
+        d_B.copy_from_host(B_h.data(), N * K);
+
+        cuda::matmul_transB_f32(handle, d_A.data(), d_B.data(), d_C.data(), M, K, N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<float> gpu_C_f(M * N);
+        d_C.copy_to_host(gpu_C_f.data(), M * N);
+
+        float diff = max_abs_diff(gpu_C_f, ref_C_f);
+        CHECK(diff <= tolerance);
+    }
+
+    cublasDestroy(handle);
+}

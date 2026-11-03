@@ -30,7 +30,7 @@ All requirements and deliverables for Task P4b were completed and verified:
      1. Top-1 prediction is identical (or margin between top-1 candidates is $< 0.05$).
      2. Relative error ratio: $\text{cached\_error} / \text{recompute\_error} \le 1.5$ for both mean and max across vocabulary.
 3. **Sampler Padding Token Masking (`src/runtime/sampler.cu`, `tests/test_sampler.cpp`)**:
-   - Added check ensuring tokens with ID $\ge 151,936$ (Qwen2.5-0.5B unpadded vocab size) have logits initialized to $-\infty$, preventing garbage token emission.
+   - Masks token IDs $\ge 151{,}665$ (the real tokenizer vocab boundary; model `vocab_size` 151,936 is padded to a multiple of 64) to $-\infty$, preventing garbage token emission.
    - Added explicit doctest assertion verifying padded token suppression.
 4. **Decisions Documentation (`docs/decisions.md`)**:
    - Documented: (1) KV cache layout `[layer][2][kv_head][max_seq][head_dim]` in FP16, (2) FP32 logits evaluation and padding token masking, and (3) Sampler architecture (host-assisted vs planned GPU kernel migration for P10/P11).
@@ -179,9 +179,72 @@ Because host enqueue is strictly faster than GPU execution, GPU queues never dra
 
 ---
 
-## 8. Next session must know
+## 8. FP32 LM Head Implementation (P4b addendum)
+
+### 8.1 `matmul_transB_f32` Unit Test (25 Random Shapes)
+
+Command:
+```cmd
+build\tests\test_cuda_ops.exe --test-case="*matmul_transB_f32*"
+```
+Output (within full ctest run):
+```
+[doctest] test cases:  10 |  10 passed | 0 failed | 0 skipped
+[doctest] assertions: 275 | 275 passed | 0 failed |
+[doctest] Status: SUCCESS!
+```
+The test generates 25 random (M, N, K) shapes, computes the FP32 CPU reference (`C = A × B^T`, FP32 throughout), and verifies the GPU `matmul_transB_f32` result matches within tolerance `2e-4`. All 25 shapes pass.
+
+### 8.2 compute-sanitizer memcheck: `test_cuda_ops`
+
+Command:
+```cmd
+& "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\compute-sanitizer\compute-sanitizer.exe" --tool memcheck build\tests\test_cuda_ops.exe
+```
+Output:
+```
+========= COMPUTE-SANITIZER
+[doctest] test cases:  10 |  10 passed | 0 failed | 0 skipped
+[doctest] assertions: 275 | 275 passed | 0 failed |
+[doctest] Status: SUCCESS!
+========= ERROR SUMMARY: 0 errors
+```
+
+### 8.3 compute-sanitizer memcheck: `test_sampler`
+
+Command:
+```cmd
+& "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\compute-sanitizer\compute-sanitizer.exe" --tool memcheck build\tests\test_sampler.exe
+```
+Output:
+```
+========= COMPUTE-SANITIZER
+[doctest] test cases:    5 |    5 passed | 0 failed | 0 skipped
+[doctest] assertions: 1210 | 1210 passed | 0 failed |
+[doctest] Status: SUCCESS!
+========= ERROR SUMMARY: 0 errors
+```
+
+### 8.4 FP32 LM Head — Near-Tie Resolution
+
+- **`03_long/pos12`**: Mismatch **resolved**. The two candidates (token 13 vs 11) had a margin of only 0.003 in the CPU FP32 reference. FP16 output truncation rounded both to 22.265625, creating a spurious tie. FP32 output preserves the 0.0044 gap → token 13 is now correctly selected.
+- **`05_unicode/pos37`**: Mismatch **remains — valid near-tie**. Token 11884 vs 9612 have only 0.0094 margin in the FP32 reference. FP16 accumulation across the preceding 24 transformer layers shifts the hidden state enough to reverse the order by 0.0018. This is a genuine near-tie originating from accumulated FP16 rounding in the transformer layers, not from the LM head output format. Margin 0.0094 < 0.05 → passes Gate 1.5.
+
+### 8.5 `docs/decisions.md` Updated
+
+Section 2 updated from "FP32 Logits Evaluation & Precision Format" (decided) to "FP32 Logits — Implemented (P4b)" with:
+- Implementation details (`cublasGemmEx` with `CUDA_R_32F` output, `DeviceBuffer<float>` logits, FP32-native sampler kernels)
+- Near-tie resolution notes (03/pos12 resolved, 05/pos37 valid near-tie)
+- Corrected logits transfer size from FP16 to FP32
+
+---
+
+## 9. Next session must know
 - **Launch-bound status**: Decode is **GPU execution bound** (host enqueue 16.03 ms vs GPU execution 16.09 ms). The P4 claim of launch-bound was an artifact of per-kernel `cudaEvent` timing.
 - **Decomposition**: Intercept is 6.97 ms (weight memory ceiling 4.33 ms); slope is 17.53 $\mu$s/tok (attention bandwidth is 0.70 GB/s, a $326\times$ gap to peak).
 - **Gate 1.7 definition**: $\le 1.5\times$ relative error vs CPU FP32 reference and 100% top-1 match (or $<0.05$ margin tie). All 8 prompts pass cleanly.
-- **Sampler status**: Padded token masking ($\ge 151,936 \to -\infty$) is tested and active. Sampling remains host-assisted and must be ported to GPU before P10/P11.
+- **FP32 logits implemented**: LM head outputs FP32 on device (`cublasGemmEx` `CUDA_R_32F`), sampler operates natively in FP32 (`argmax_kernel_f32`, `apply_repetition_penalty_kernel_f32`). This resolved the 03/pos12 near-tie; 05/pos37 remains a valid near-tie from FP16 transformer layers.
+- **Padding mask**: Token IDs $\ge 151{,}665$ (the real tokenizer vocab boundary) are masked to $-\infty$. Previous code masked at $\ge 151{,}936$ which was a no-op.
+- **Sampler status**: Padded token masking is tested and active. Sampling remains host-assisted and must be ported to GPU before P10/P11.
+- **compute-sanitizer clean**: Both `test_cuda_ops` (10 cases, 275 assertions) and `test_sampler` (5 cases, 1210 assertions) pass memcheck with 0 errors.
 

@@ -13,10 +13,16 @@ The contiguous KV cache is allocated per sequence with the layout:
 
 ---
 
-## 2. FP32 Logits Evaluation & Precision Format
+## 2. FP32 Logits — Implemented (P4b)
 
 ### Decision:
-The LM head projection operates on FP16 activations and FP16 tied embedding weights using `cublasGemmEx` with FP32 accumulation (`CUDA_R_32F`). Logits returned to host and processed by the sampler are represented in FP32 (or FP16 on device during fused sampling).
+The LM head projection operates on FP16 activations and FP16 tied embedding weights using `cublasGemmEx` with **FP32 output on device** (`CUDA_R_32F` output type). The logits buffer (`DeviceBuffer<float>`) and the sampler (`sample(const float*, ...)`, `argmax_kernel_f32`, `apply_repetition_penalty_kernel_f32`) all operate natively in FP32. No FP16-to-FP32 conversion is needed in the sampling path.
+
+### Implementation Status:
+- **Implemented** in commit `90f97b2` (P4b). The `matmul_transB_f32` function in `forward_gpu.cu` calls `cublasGemmEx` with `CUDA_R_32F` for the C/D matrices.
+- **P3 teacher-forced gate result after FP32 LM head**:
+  - `03_long/pos12` mismatch **resolved**: The two candidates (token 13 vs 11) had a margin of only 0.003 in the CPU FP32 reference. FP16 output truncation rounded both to 22.265625, creating a spurious tie. FP32 output preserves the 0.0044 gap.
+  - `05_unicode/pos37` mismatch **remains — valid near-tie**: Token 11884 vs 9612 have only 0.0094 margin in the FP32 reference. FP16 accumulation across the preceding 24 transformer layers shifts the hidden state enough to reverse the order by 0.0018. This is a genuine near-tie originating from accumulated FP16 rounding in the transformer layers, not from the LM head output format.
 
 ### Justification:
 - Qwen2.5-0.5B-Instruct has a model output vocabulary dimension of 151,936 tokens (padded from the tokenizer's 151,665 tokens up to the nearest multiple of 64 for optimal tensor core alignment).
@@ -33,7 +39,7 @@ The LM head projection operates on FP16 activations and FP16 tied embedding weig
 - Repetition penalty and greedy argmax reduction kernels are available on GPU.
 
 ### Roadmap to P10 / P11:
-- For batch-1 decode with host control, downloading $1 \times 151,936$ FP16 logits takes $\sim 0.15$ ms across PCIe, which is negligible compared to current decode latencies ($\sim 15$ ms).
+- For batch-1 decode with host control, downloading $1 \times 151,936$ FP32 logits takes $\sim 0.3$ ms across PCIe, which is negligible compared to current decode latencies ($\sim 15$ ms).
 - However, for continuous batching (Task P10) and CUDA Graphs (Task P11), CPU synchronization on the decode loop is strictly prohibited.
 - Full GPU-native sampling (GPU top-$k$ via radix select / parallel bitonic select, GPU top-$p$ scan, and GPU RNG kernel without host round-trip) will be integrated directly into the CUDA Graph runner prior to P10/P11.
 
