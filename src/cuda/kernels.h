@@ -151,6 +151,40 @@ void matmul_transB_f32(
     int N
 );
 
+// 10. Custom FP16 GEMV for decode (M=1), one warp per output neuron.
+//     y[n] = sum_k(W[n,k] * x[k])   W:[N,K] FP16, x:[K] FP16, y:[N] FP16
+void gemv(
+    const half* W,     // [N, K] row-major
+    const half* x,     // [K]
+    half* y,           // [N]
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+// 10b. GEMV + bias:  y[n] = dot(W[n], x) + b[n]
+void gemv_bias(
+    const half* W,     // [N, K]
+    const half* x,     // [K]
+    const half* b,     // [N]
+    half* y,           // [N]
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+// 10c. GEMV + residual (fused residual add):  y[n] = dot(W[n], x) + r[n]
+// Used for o_proj and down_proj in decode.
+void gemv_residual(
+    const half* W,     // [N, K]
+    const half* x,     // [K]
+    const half* r,     // [N]  residual to add
+    half* y,           // [N]  output
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
 } // namespace cuda
 } // namespace engine
 

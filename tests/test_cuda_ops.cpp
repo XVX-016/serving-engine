@@ -477,6 +477,201 @@ TEST_CASE("CUDA Kernel Test: cuBLAS matmul_transB (20+ random shapes)") {
     cublasDestroy(handle);
 }
 
+// ==================== P5: Custom GEMV Tests ====================
+
+// CPU reference for GEMV: y[n] = sum_k(W[n,k] * x[k])
+static void cpu_gemv(const float* W, const float* x, float* y, int N, int K) {
+    for (int n = 0; n < N; ++n) {
+        float acc = 0.0f;
+        for (int k = 0; k < K; ++k) acc += W[n * K + k] * x[k];
+        y[n] = acc;
+    }
+}
+
+TEST_CASE("CUDA Kernel Test: custom gemv (bare, 25 shapes)") {
+    // gemv: y[n] = sum_k(W[n,k] * x[k])   W:[N,K] FP16, x:[K] FP16, y:[N] FP16
+    // Tolerance: FP16 accumulation error at K=4864 can reach ~0.5% relative.
+    // Use absolute tolerance relative to max(|ref|).
+    std::mt19937 rng(1001);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    // Test shapes: small, non-tile-multiple, and the real decode GEMV dimensions
+    struct Shape { int N, K; };
+    std::vector<Shape> shapes = {
+        {1, 1}, {7, 13}, {33, 37}, {64, 128}, {128, 64},
+        {896, 896},   // Q/O decode
+        {128, 896},   // K/V decode
+        {4864, 896},  // Gate/Up decode
+        {896, 4864},  // Down decode
+        {1, 896}, {896, 1}, {3, 5}, {17, 31}, {63, 65},
+        {129, 127}, {256, 256}, {512, 512},
+        {4864, 32}, {32, 4864},
+        {896, 7}, {7, 896}, {128, 128}, {64, 64}, {31, 31}, {13, 17}
+    };
+    // We have exactly 25 shapes listed above
+    REQUIRE(shapes.size() == 25);
+
+    for (const auto& s : shapes) {
+        int N = s.N, K = s.K;
+        std::vector<float> W_f(N * K), x_f(K);
+        for (auto& v : W_f) v = dist(rng);
+        for (auto& v : x_f) v = dist(rng);
+
+        // FP16-round both (simulate device precision)
+        std::vector<half> W_h = to_half(W_f);
+        std::vector<half> x_h = to_half(x_f);
+        std::vector<float> W_hf = to_float(W_h);
+        std::vector<float> x_hf = to_float(x_h);
+
+        std::vector<float> ref(N);
+        cpu_gemv(W_hf.data(), x_hf.data(), ref.data(), N, K);
+
+        DeviceBuffer<half> d_W(N * K), d_x(K);
+        DeviceBuffer<half> d_y(N);
+        d_W.copy_from_host(W_h.data(), N * K);
+        d_x.copy_from_host(x_h.data(), K);
+
+        cuda::gemv(d_W.data(), d_x.data(), d_y.data(), N, K);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<half> gpu_y_h(N);
+        d_y.copy_to_host(gpu_y_h.data(), N);
+        std::vector<float> gpu_y = to_float(gpu_y_h);
+
+        // Tolerance: 1% of max(|ref|), at least 1e-3
+        float max_ref = 1e-6f;
+        for (float v : ref) max_ref = std::max(max_ref, std::abs(v));
+        float tol = std::max(1e-2f * max_ref, 1e-3f);
+
+        float diff = max_abs_diff(gpu_y, ref);
+        INFO("N=" << N << " K=" << K << " diff=" << diff << " tol=" << tol);
+        CHECK(diff <= tol);
+    }
+}
+
+TEST_CASE("CUDA Kernel Test: custom gemv_bias (25 shapes)") {
+    // gemv_bias: y[n] = sum_k(W[n,k]*x[k]) + b[n]
+    std::mt19937 rng(2002);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    struct Shape { int N, K; };
+    std::vector<Shape> shapes = {
+        {1, 1}, {7, 13}, {33, 37}, {64, 128}, {128, 64},
+        {896, 896},   // Q decode
+        {128, 896},   // K/V decode
+        {4864, 896},  // Gate/Up (no real bias, but test variant)
+        {896, 4864},  // Down
+        {1, 896}, {896, 1}, {3, 5}, {17, 31}, {63, 65},
+        {129, 127}, {256, 256}, {512, 512},
+        {4864, 32}, {32, 4864},
+        {896, 7}, {7, 896}, {128, 128}, {64, 64}, {31, 31}, {13, 17}
+    };
+    REQUIRE(shapes.size() == 25);
+
+    for (const auto& s : shapes) {
+        int N = s.N, K = s.K;
+        std::vector<float> W_f(N * K), x_f(K), b_f(N);
+        for (auto& v : W_f) v = dist(rng);
+        for (auto& v : x_f) v = dist(rng);
+        for (auto& v : b_f) v = dist(rng);
+
+        std::vector<half> W_h = to_half(W_f);
+        std::vector<half> x_h = to_half(x_f);
+        std::vector<half> b_h = to_half(b_f);
+        std::vector<float> W_hf = to_float(W_h);
+        std::vector<float> x_hf = to_float(x_h);
+        std::vector<float> b_hf = to_float(b_h);
+
+        std::vector<float> ref(N);
+        cpu_gemv(W_hf.data(), x_hf.data(), ref.data(), N, K);
+        for (int n = 0; n < N; ++n) ref[n] += b_hf[n];
+
+        DeviceBuffer<half> d_W(N * K), d_x(K), d_b(N);
+        DeviceBuffer<half> d_y(N);
+        d_W.copy_from_host(W_h.data(), N * K);
+        d_x.copy_from_host(x_h.data(), K);
+        d_b.copy_from_host(b_h.data(), N);
+
+        cuda::gemv_bias(d_W.data(), d_x.data(), d_b.data(), d_y.data(), N, K);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<half> gpu_y_h(N);
+        d_y.copy_to_host(gpu_y_h.data(), N);
+        std::vector<float> gpu_y = to_float(gpu_y_h);
+
+        float max_ref = 1e-6f;
+        for (float v : ref) max_ref = std::max(max_ref, std::abs(v));
+        float tol = std::max(1e-2f * max_ref, 1e-3f);
+
+        float diff = max_abs_diff(gpu_y, ref);
+        INFO("N=" << N << " K=" << K << " diff=" << diff << " tol=" << tol);
+        CHECK(diff <= tol);
+    }
+}
+
+TEST_CASE("CUDA Kernel Test: custom gemv_residual (25 shapes)") {
+    // gemv_residual: y[n] = sum_k(W[n,k]*x[k]) + residual[n]
+    std::mt19937 rng(3003);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    struct Shape { int N, K; };
+    std::vector<Shape> shapes = {
+        {1, 1}, {7, 13}, {33, 37}, {64, 128}, {128, 64},
+        {896, 896},   // O-proj / down_proj decode (both N=H=896)
+        {128, 896},
+        {4864, 896},
+        {896, 4864},
+        {1, 896}, {896, 1}, {3, 5}, {17, 31}, {63, 65},
+        {129, 127}, {256, 256}, {512, 512},
+        {4864, 32}, {32, 4864},
+        {896, 7}, {7, 896}, {128, 128}, {64, 64}, {31, 31}, {13, 17}
+    };
+    REQUIRE(shapes.size() == 25);
+
+    for (const auto& s : shapes) {
+        int N = s.N, K = s.K;
+        std::vector<float> W_f(N * K), x_f(K), r_f(N);
+        for (auto& v : W_f) v = dist(rng);
+        for (auto& v : x_f) v = dist(rng);
+        for (auto& v : r_f) v = dist(rng);
+
+        std::vector<half> W_h = to_half(W_f);
+        std::vector<half> x_h = to_half(x_f);
+        std::vector<half> r_h = to_half(r_f);
+        std::vector<float> W_hf = to_float(W_h);
+        std::vector<float> x_hf = to_float(x_h);
+        std::vector<float> r_hf = to_float(r_h);
+
+        std::vector<float> ref(N);
+        cpu_gemv(W_hf.data(), x_hf.data(), ref.data(), N, K);
+        for (int n = 0; n < N; ++n) ref[n] += r_hf[n];
+
+        DeviceBuffer<half> d_W(N * K), d_x(K), d_r(N);
+        DeviceBuffer<half> d_y(N);
+        d_W.copy_from_host(W_h.data(), N * K);
+        d_x.copy_from_host(x_h.data(), K);
+        d_r.copy_from_host(r_h.data(), N);
+
+        // gemv_residual writes result to d_y (separate buffer); residual in d_r
+        cuda::gemv_residual(d_W.data(), d_x.data(), d_r.data(), d_y.data(), N, K);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<half> gpu_y_h(N);
+        d_y.copy_to_host(gpu_y_h.data(), N);
+        std::vector<float> gpu_y = to_float(gpu_y_h);
+
+        float max_ref = 1e-6f;
+        for (float v : ref) max_ref = std::max(max_ref, std::abs(v));
+        float tol = std::max(1e-2f * max_ref, 1e-3f);
+
+        float diff = max_abs_diff(gpu_y, ref);
+        INFO("N=" << N << " K=" << K << " diff=" << diff << " tol=" << tol);
+        CHECK(diff <= tol);
+    }
+}
+
+// ==================== end P5 GEMV tests ====================
+
 TEST_CASE("CUDA Kernel Test: cuBLAS matmul_transB_f32 (25 random shapes)") {
     std::mt19937 rng(51);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);

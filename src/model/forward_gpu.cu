@@ -567,39 +567,24 @@ std::vector<float> decode_step_gpu(
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps);
         timed_end(lp + "input_rmsnorm");
 
-        // 2b. Q/K/V projections (M=1)
+        // 2b. Q/K/V projections (M=1) — custom GEMV with fused bias
         timed_begin(lp + "q_proj");
-        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                           lw.q_proj_weight.data(), buffers.q.data(),
-                           1, static_cast<int>(H), static_cast<int>(H));
+        cuda::gemv_bias(lw.q_proj_weight.data(), buffers.norm_out.data(),
+                        lw.q_proj_bias.data(), buffers.q.data(),
+                        static_cast<int>(H), static_cast<int>(H));
         timed_end(lp + "q_proj");
 
-        timed_begin(lp + "q_bias");
-        cuda::bias_add(buffers.q.data(), lw.q_proj_bias.data(),
-                      buffers.q.data(), 1, H);
-        timed_end(lp + "q_bias");
-
         timed_begin(lp + "k_proj");
-        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                           lw.k_proj_weight.data(), buffers.k.data(),
-                           1, static_cast<int>(H), static_cast<int>(kv_dim));
+        cuda::gemv_bias(lw.k_proj_weight.data(), buffers.norm_out.data(),
+                        lw.k_proj_bias.data(), buffers.k.data(),
+                        static_cast<int>(kv_dim), static_cast<int>(H));
         timed_end(lp + "k_proj");
 
-        timed_begin(lp + "k_bias");
-        cuda::bias_add(buffers.k.data(), lw.k_proj_bias.data(),
-                      buffers.k.data(), 1, kv_dim);
-        timed_end(lp + "k_bias");
-
         timed_begin(lp + "v_proj");
-        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                           lw.v_proj_weight.data(), buffers.v.data(),
-                           1, static_cast<int>(H), static_cast<int>(kv_dim));
+        cuda::gemv_bias(lw.v_proj_weight.data(), buffers.norm_out.data(),
+                        lw.v_proj_bias.data(), buffers.v.data(),
+                        static_cast<int>(kv_dim), static_cast<int>(H));
         timed_end(lp + "v_proj");
-
-        timed_begin(lp + "v_bias");
-        cuda::bias_add(buffers.v.data(), lw.v_proj_bias.data(),
-                      buffers.v.data(), 1, kv_dim);
-        timed_end(lp + "v_bias");
 
         // 2c. RoPE with absolute position current_pos
         timed_begin(lp + "rope");
@@ -635,18 +620,12 @@ std::vector<float> decode_step_gpu(
         );
         timed_end(lp + "decode_attention");
 
-        // 2e. Output projection (M=1)
-        timed_begin(lp + "o_proj");
-        cuda::matmul_transB(cublas_handle, buffers.attn_out.data(),
-                           lw.o_proj_weight.data(), buffers.proj_out.data(),
-                           1, static_cast<int>(H), static_cast<int>(H));
-        timed_end(lp + "o_proj");
-
-        // 2f. Residual add
-        timed_begin(lp + "attn_residual");
-        cuda::residual_add(buffers.hidden_states.data(), buffers.proj_out.data(),
-                          buffers.hidden_states.data(), H);
-        timed_end(lp + "attn_residual");
+        // 2e. Output projection (M=1) fused with residual add into hidden_states
+        timed_begin(lp + "o_proj_residual");
+        cuda::gemv_residual(lw.o_proj_weight.data(), buffers.attn_out.data(),
+                            buffers.hidden_states.data(), buffers.hidden_states.data(),
+                            static_cast<int>(H), static_cast<int>(H));
+        timed_end(lp + "o_proj_residual");
 
         // 3a. Post-attention RMSNorm
         timed_begin(lp + "post_rmsnorm");
@@ -654,17 +633,17 @@ std::vector<float> decode_step_gpu(
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps);
         timed_end(lp + "post_rmsnorm");
 
-        // 3b. Gate & Up projections (M=1)
+        // 3b. Gate & Up projections (M=1) — custom GEMV
         timed_begin(lp + "gate_proj");
-        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                           lw.gate_proj_weight.data(), buffers.gate.data(),
-                           1, static_cast<int>(H), static_cast<int>(inter_dim));
+        cuda::gemv(lw.gate_proj_weight.data(), buffers.norm_out.data(),
+                   buffers.gate.data(),
+                   static_cast<int>(inter_dim), static_cast<int>(H));
         timed_end(lp + "gate_proj");
 
         timed_begin(lp + "up_proj");
-        cuda::matmul_transB(cublas_handle, buffers.norm_out.data(),
-                           lw.up_proj_weight.data(), buffers.up.data(),
-                           1, static_cast<int>(H), static_cast<int>(inter_dim));
+        cuda::gemv(lw.up_proj_weight.data(), buffers.norm_out.data(),
+                   buffers.up.data(),
+                   static_cast<int>(inter_dim), static_cast<int>(H));
         timed_end(lp + "up_proj");
 
         // 3c. SwiGLU
@@ -673,18 +652,12 @@ std::vector<float> decode_step_gpu(
                     buffers.act.data(), inter_dim);
         timed_end(lp + "swiglu");
 
-        // 3d. Down projection
-        timed_begin(lp + "down_proj");
-        cuda::matmul_transB(cublas_handle, buffers.act.data(),
-                           lw.down_proj_weight.data(), buffers.mlp_out.data(),
-                           1, static_cast<int>(inter_dim), static_cast<int>(H));
-        timed_end(lp + "down_proj");
-
-        // 3e. Residual add
-        timed_begin(lp + "mlp_residual");
-        cuda::residual_add(buffers.hidden_states.data(), buffers.mlp_out.data(),
-                          buffers.hidden_states.data(), H);
-        timed_end(lp + "mlp_residual");
+        // 3d. Down projection fused with residual add into hidden_states
+        timed_begin(lp + "down_proj_residual");
+        cuda::gemv_residual(lw.down_proj_weight.data(), buffers.act.data(),
+                            buffers.hidden_states.data(), buffers.hidden_states.data(),
+                            static_cast<int>(H), static_cast<int>(inter_dim));
+        timed_end(lp + "down_proj_residual");
     }
 
     kv_cache.set_current_seq_len(current_pos + 1);
