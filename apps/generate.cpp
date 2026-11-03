@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     bool verify_kv_cache = false;
     bool profile_step = false;
     bool profile_decode = false;
+    bool bench_enqueue = false;
     bool use_gpu = false;
     bool use_kv_cache = false;
     std::string model_path = "data/models/hf-cache/snapshots/7ae557604adf67be50417f59c2c2f167def9a775";
@@ -59,6 +60,8 @@ int main(int argc, char** argv) {
             profile_step = true;
         } else if (arg == "--profile-decode") {
             profile_decode = true;
+        } else if (arg == "--bench-enqueue") {
+            bench_enqueue = true;
         } else if (arg == "--gpu") {
             use_gpu = true;
         } else if (arg == "--kv-cache") {
@@ -187,7 +190,7 @@ int main(int argc, char** argv) {
     }
 
     // Convert weights to FP32 or GPU FP16 depending on mode
-    bool need_gpu = dump_all_gpu || verify_greedy_gpu || verify_kv_cache || profile_step || profile_decode || use_gpu;
+    bool need_gpu = dump_all_gpu || verify_greedy_gpu || verify_kv_cache || profile_step || profile_decode || bench_enqueue || use_gpu;
 
     engine::ModelWeightsFP32 weights_fp32;
     engine::ModelWeightsGPU weights_gpu;
@@ -441,9 +444,22 @@ int main(int argc, char** argv) {
         // Warmup 5 decode steps
         int next_token = 100;
         for (int w = 0; w < 5; ++w) {
-            engine::decode_step_gpu(next_token, 512 + w, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+            engine::decode_step_gpu(next_token, 512 + w, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
         }
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Measure unprofiled steady-state step time with 2 events around the whole step
+        cudaEvent_t ev_step_start, ev_step_stop;
+        CUDA_CHECK(cudaEventCreate(&ev_step_start));
+        CUDA_CHECK(cudaEventCreate(&ev_step_stop));
+        CUDA_CHECK(cudaEventRecord(ev_step_start));
+        engine::decode_step_gpu(next_token, 517, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+        CUDA_CHECK(cudaEventRecord(ev_step_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_step_stop));
+        float unprofiled_gpu_ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&unprofiled_gpu_ms, ev_step_start, ev_step_stop));
+        CUDA_CHECK(cudaEventDestroy(ev_step_start));
+        CUDA_CHECK(cudaEventDestroy(ev_step_stop));
 
         std::vector<engine::KernelRecord> records;
         auto t_wall_start = std::chrono::high_resolution_clock::now();
@@ -474,7 +490,9 @@ int main(int argc, char** argv) {
 
         std::cout << "\nProfile Results (Single-Token Decode Step, Context 517):\n";
         std::cout << "  Total Kernels Launched: " << records.size() << "\n";
+        std::cout << "  Unprofiled GPU Step:    " << unprofiled_gpu_ms << " ms\n";
         std::cout << "  Host Wall Time:         " << wall_ms << " ms\n";
+        std::cout << "  Instrumented GPU Time:  " << total_gpu_busy_ms << " ms\n";
         std::cout << "  GPU Busy Time:          " << total_gpu_busy_ms << " ms\n";
         std::cout << "  Idle / Gap Time:        " << idle_ms << " ms (" << idle_pct << "%)\n";
 
@@ -513,6 +531,73 @@ int main(int argc, char** argv) {
         prof_file.close();
 
         std::cout << "\nSaved decode profile analysis to docs/profiles/P4_decode_profile.md\n";
+        if (cublas_handle) cublasDestroy(cublas_handle);
+        return 0;
+    }
+
+    // Case 1c3: Host Enqueue vs GPU Execution Test (--bench-enqueue)
+    if (bench_enqueue) {
+        std::cout << "=== Running Host Enqueue Test (200 Decode Steps Back-to-Back, No Sync Inside) ===\n";
+        // Construct 512 tokens prompt
+        std::string base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. ";
+        std::vector<int> b_toks = tokenizer.encode(base_text, false);
+        std::vector<int64_t> prompt_toks;
+        while (prompt_toks.size() < 512) {
+            for (int t : b_toks) {
+                if (prompt_toks.size() < 512) prompt_toks.push_back(t);
+                else break;
+            }
+        }
+
+        // Prefill cache to 512 tokens
+        kv_cache.set_current_seq_len(0);
+        engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Warmup 10 decode steps
+        int next_token = 100;
+        for (int w = 0; w < 10; ++w) {
+            engine::decode_step_gpu(next_token, 512 + w, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        const int num_steps = 200;
+        cudaEvent_t ev_start, ev_stop;
+        CUDA_CHECK(cudaEventCreate(&ev_start));
+        CUDA_CHECK(cudaEventCreate(&ev_stop));
+
+        // Start GPU event timing
+        CUDA_CHECK(cudaEventRecord(ev_start));
+
+        // Time host enqueue across 200 steps with NO synchronization inside
+        auto t_host_start = std::chrono::high_resolution_clock::now();
+        for (int s = 0; s < num_steps; ++s) {
+            // Pass buffers_gpu.logits.data() as d_last_logits so decode_step_gpu doesn't do synchronous D2H copy
+            engine::decode_step_gpu(next_token, 522 + (s % 100), cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+        }
+        auto t_host_end = std::chrono::high_resolution_clock::now();
+
+        // End GPU event timing
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+
+        float total_gpu_ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&total_gpu_ms, ev_start, ev_stop));
+        double total_host_enqueue_ms = std::chrono::duration<double, std::milli>(t_host_end - t_host_start).count();
+
+        double host_per_step_ms = total_host_enqueue_ms / num_steps;
+        double gpu_per_step_ms = total_gpu_ms / num_steps;
+
+        std::cout << "\nEnqueue Benchmark Results (" << num_steps << " steps):\n";
+        std::cout << "  Host Enqueue Total:    " << total_host_enqueue_ms << " ms (" << host_per_step_ms << " ms/step, "
+                  << (host_per_step_ms * 1000.0) << " us/step)\n";
+        std::cout << "  GPU Execution Total:   " << total_gpu_ms << " ms (" << gpu_per_step_ms << " ms/step)\n";
+        std::cout << "  Enqueue vs GPU Ratio:  " << (host_per_step_ms / gpu_per_step_ms) * 100.0 << "%\n";
+        bool is_launch_bound = (host_per_step_ms >= gpu_per_step_ms);
+        std::cout << "  Launch-Bound Verdict:  " << (is_launch_bound ? "YES (Host enqueue >= GPU time)" : "NO (Host enqueues faster than GPU executes)") << "\n";
+
+        CUDA_CHECK(cudaEventDestroy(ev_start));
+        CUDA_CHECK(cudaEventDestroy(ev_stop));
         if (cublas_handle) cublasDestroy(cublas_handle);
         return 0;
     }

@@ -512,14 +512,17 @@ std::vector<float> prefill_gpu(
                        1, static_cast<int>(H), static_cast<int>(V));
     timed_end("lm_head");
 
-    // Download only last-position logits (1 * V)
-    std::vector<half> logits_h(V);
-    CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
-               V * sizeof(half), cudaMemcpyDeviceToHost));
+    // Download only last-position logits (1 * V) if requested (skip when d_last_logits provided for async pipeline)
+    std::vector<float> logits_f;
+    if (!d_last_logits) {
+        std::vector<half> logits_h(V);
+        CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
+                   V * sizeof(half), cudaMemcpyDeviceToHost));
 
-    std::vector<float> logits_f(V);
-    for (int64_t i = 0; i < V; ++i) {
-        logits_f[i] = __half2float(logits_h[i]);
+        logits_f.resize(V);
+        for (int64_t i = 0; i < V; ++i) {
+            logits_f[i] = __half2float(logits_h[i]);
+        }
     }
     return logits_f;
 }
@@ -710,14 +713,17 @@ std::vector<float> decode_step_gpu(
                        1, static_cast<int>(H), static_cast<int>(V));
     timed_end("lm_head");
 
-    // Download only last-position logits (1 * V)
-    std::vector<half> logits_h(V);
-    CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
-               V * sizeof(half), cudaMemcpyDeviceToHost));
+    // Download only last-position logits (1 * V) if requested (skip when d_last_logits provided for async pipeline)
+    std::vector<float> logits_f;
+    if (!d_last_logits) {
+        std::vector<half> logits_h(V);
+        CUDA_CHECK(cudaMemcpy(logits_h.data(), target_logits,
+                   V * sizeof(half), cudaMemcpyDeviceToHost));
 
-    std::vector<float> logits_f(V);
-    for (int64_t i = 0; i < V; ++i) {
-        logits_f[i] = __half2float(logits_h[i]);
+        logits_f.resize(V);
+        for (int64_t i = 0; i < V; ++i) {
+            logits_f[i] = __half2float(logits_h[i]);
+        }
     }
     return logits_f;
 }

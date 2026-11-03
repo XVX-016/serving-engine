@@ -217,12 +217,14 @@ TEST_CASE("Gate 1.7 Equivalence: Cached decode logits equal full-recompute logit
     cublasHandle_t cublas_handle;
     CUBLAS_CHECK(cublasCreate(&cublas_handle));
 
-    // Test across reference prompts
+    // Test across ALL 8 reference prompts
     std::vector<std::string> prompt_names = {
-        "01_short", "02_medium", "04_code", "06_cjk_emoji", "08_whitespace_indent"
+        "01_short", "02_medium", "03_long", "04_code",
+        "05_unicode", "06_cjk_emoji", "07_chat_template", "08_whitespace_indent"
     };
 
     float global_max_diff = 0.0f;
+    bool all_gate_passed = true;
 
     for (const auto& pname : prompt_names) {
         std::string token_file = "data/reference/" + pname + "/token_ids.npy";
@@ -247,57 +249,109 @@ TEST_CASE("Gate 1.7 Equivalence: Cached decode logits equal full-recompute logit
         std::vector<int64_t> tokens(S);
         tf.read(reinterpret_cast<char*>(tokens.data()), data_len);
 
-        // Prefill with first token to initialize cache, then decode step by step for tokens 1 .. S-1
-        // And compare cached decode logits against full-recompute logits at each position pos
+        // Load CPU FP32 reference logits
+        std::string ref_logits_file = "data/reference/" + pname + "/logits.npy";
+        std::ifstream rlf(ref_logits_file, std::ios::binary);
+        REQUIRE(rlf.is_open());
+        char r_magic[6], r_ver[2];
+        rlf.read(r_magic, 6);
+        rlf.read(r_ver, 2);
+        uint16_t r_hlen = 0;
+        rlf.read(reinterpret_cast<char*>(&r_hlen), 2);
+        std::string r_header(r_hlen, ' ');
+        rlf.read(&r_header[0], r_hlen);
+        rlf.seekg(0, std::ios::end);
+        size_t r_data_len = static_cast<size_t>(rlf.tellg()) - (10 + r_hlen);
+        rlf.seekg(10 + r_hlen, std::ios::beg);
+        std::vector<float> ref_all_logits(r_data_len / sizeof(float));
+        rlf.read(reinterpret_cast<char*>(ref_all_logits.data()), r_data_len);
+
+        // Run full recompute on all tokens to get recompute logits for all positions
+        std::vector<float> recompute_all = forward_gpu(
+            tokens, cfg, weights_gpu, buffers_gpu, cublas_handle
+        );
+
+        // Prefill with first token to initialize cache, then decode step by step
         kv_cache.set_current_seq_len(0);
+
+        std::vector<float> cached_decode_logits(S * cfg.vocab_size);
 
         // Run prefill on token 0
         std::vector<int64_t> prefill_tok = {tokens[0]};
         std::vector<float> prefill_logits = prefill_gpu(
             prefill_tok, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle
         );
+        std::copy(prefill_logits.begin(), prefill_logits.end(), cached_decode_logits.begin());
 
-        // Compare position 0 logits with full-recompute logits
-        std::vector<float> recompute_p0 = forward_gpu(
-            prefill_tok, cfg, weights_gpu, buffers_gpu, cublas_handle
-        );
-        float diff_0 = max_abs_diff(prefill_logits, recompute_p0);
-        if (diff_0 > global_max_diff) global_max_diff = diff_0;
-        CHECK(diff_0 <= 1e-3f);
-
-        // Now step-by-step decode tokens 1 .. S - 1
+        // Decode tokens 1 .. S-1
         for (size_t pos = 1; pos < S; ++pos) {
             std::vector<float> decode_logits = decode_step_gpu(
                 tokens[pos], static_cast<int>(pos), cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle
             );
-
-            // Full recompute of prefix tokens[0 .. pos]
-            std::vector<int64_t> prefix_toks(tokens.begin(), tokens.begin() + pos + 1);
-            std::vector<float> full_logits = forward_gpu(
-                prefix_toks, cfg, weights_gpu, buffers_gpu, cublas_handle
-            );
-
-            // Last-position logits of full recompute
-            const float* full_last = full_logits.data() + pos * cfg.vocab_size;
-            std::vector<float> full_last_vec(full_last, full_last + cfg.vocab_size);
-
-            float diff_pos = max_abs_diff(decode_logits, full_last_vec);
-            if (diff_pos > global_max_diff) global_max_diff = diff_pos;
-
-            // Check argmax match
-            int decode_argmax = static_cast<int>(std::max_element(decode_logits.begin(), decode_logits.end()) - decode_logits.begin());
-            int full_argmax = static_cast<int>(std::max_element(full_last_vec.begin(), full_last_vec.end()) - full_last_vec.begin());
-            CHECK(decode_argmax == full_argmax);
-
-            // Gate criterion: FP16 accumulation difference threshold <= 0.1
-            CHECK(diff_pos <= 0.1f);
+            std::copy(decode_logits.begin(), decode_logits.end(), cached_decode_logits.begin() + pos * cfg.vocab_size);
         }
 
-        std::cout << "Prompt [" << pname << "] (" << S << " tokens): All positions verified. Max diff = "
-                  << global_max_diff << std::endl;
+        // Now evaluate Gate 1.7 criteria at every position:
+        // 1. Top-1 identical or near-tie (ref margin < 0.05)
+        // 2. Cached path error vs CPU FP32 reference <= 1.5x recompute path error vs CPU reference (mean & max)
+        double sum_cached_err = 0.0;
+        double sum_recompute_err = 0.0;
+        float prompt_max_cached_err = 0.0f;
+        float prompt_max_recompute_err = 0.0f;
+
+        for (size_t pos = 0; pos < S; ++pos) {
+            const float* c_logits = cached_decode_logits.data() + pos * cfg.vocab_size;
+            const float* r_logits = recompute_all.data() + pos * cfg.vocab_size;
+            const float* ref_logits = ref_all_logits.data() + pos * cfg.vocab_size;
+
+            int c_top1 = 0, r_top1 = 0, ref_top1 = 0;
+            float c_max = c_logits[0], r_max = r_logits[0], ref_max = -1e30f;
+            for (int64_t v = 0; v < cfg.vocab_size; ++v) {
+                if (c_logits[v] > c_max) { c_max = c_logits[v]; c_top1 = static_cast<int>(v); }
+                if (r_logits[v] > r_max) { r_max = r_logits[v]; r_top1 = static_cast<int>(v); }
+                if (ref_logits[v] > ref_max) { ref_max = ref_logits[v]; ref_top1 = static_cast<int>(v); }
+            }
+
+            // Check top-1 match
+            if (c_top1 != r_top1) {
+                // Check near-tie against reference
+                std::vector<float> sorted_ref(ref_logits, ref_logits + cfg.vocab_size);
+                std::sort(sorted_ref.rbegin(), sorted_ref.rend());
+                float margin = sorted_ref[0] - sorted_ref[1];
+                bool passes_near_tie = (margin < 0.05f);
+                CHECK(passes_near_tie);
+                if (!passes_near_tie) all_gate_passed = false;
+            }
+
+            for (int64_t v = 0; v < cfg.vocab_size; ++v) {
+                float c_err = std::abs(c_logits[v] - ref_logits[v]);
+                float r_err = std::abs(r_logits[v] - ref_logits[v]);
+                float c_r_diff = std::abs(c_logits[v] - r_logits[v]);
+                if (c_r_diff > global_max_diff) global_max_diff = c_r_diff;
+
+                sum_cached_err += c_err;
+                sum_recompute_err += r_err;
+                if (c_err > prompt_max_cached_err) prompt_max_cached_err = c_err;
+                if (r_err > prompt_max_recompute_err) prompt_max_recompute_err = r_err;
+            }
+        }
+
+        double mean_cached_err = sum_cached_err / (S * cfg.vocab_size);
+        double mean_recompute_err = sum_recompute_err / (S * cfg.vocab_size);
+        double mean_ratio = mean_cached_err / mean_recompute_err;
+        double max_ratio = static_cast<double>(prompt_max_cached_err) / prompt_max_recompute_err;
+
+        std::cout << "Prompt [" << pname << "] (" << S << " tokens): "
+                  << "Mean Err: cached=" << mean_cached_err << ", recompute=" << mean_recompute_err << " (ratio " << mean_ratio << "x) | "
+                  << "Max Err: cached=" << prompt_max_cached_err << ", recompute=" << prompt_max_recompute_err << " (ratio " << max_ratio << "x)\n";
+
+        // Gate: cached path error vs CPU FP32 reference is at most 1.5x the recompute path error (mean and max)
+        CHECK(mean_ratio <= 1.5);
+        CHECK(max_ratio <= 1.5);
+        if (mean_ratio > 1.5 || max_ratio > 1.5) all_gate_passed = false;
     }
 
-    std::cout << "\n=== Gate 1.7 Summary: Global Max Logit Diff across all positions: "
-              << global_max_diff << " (PASS threshold <= 1e-3) ===\n";
+    std::cout << "\n=== Gate 1.7 Summary: All 8 Prompts Verified. Global Max Logit Diff (cached vs recompute): "
+              << global_max_diff << " | Gate 1.7 Status: " << (all_gate_passed ? "PASS" : "FAIL") << " ===\n";
     CUBLAS_CHECK(cublasDestroy(cublas_handle));
 }

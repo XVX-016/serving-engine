@@ -7,8 +7,11 @@ GPU FP16 forward: teacher-forced, every top-1 mismatch vs HF must have an HF FP3
   logit margin < 0.05 (the "near-tie rule"). Free-running greedy, 64 tokens: matches HF, or the
   first divergence is at such a near-tie. Also check for inf/NaN in every intermediate (BF16
   weights converted to FP16 can overflow). Accumulate in FP32 in RMSNorm and attention scores.
-KV-cache equivalence: cached decode logits equal full-recompute logits at every position
-  (max abs diff <= 1e-3).
+KV-cache equivalence: at every position, top-1 is identical (or a near-tie: HF FP32 top-1/top-2
+  margin < 0.05), AND the cached path's error vs the CPU FP32 reference is <= 1.5x the recompute
+  path's error vs the same reference (check both mean and max over positions).
+  (Changed after P4 from "cached vs recompute max abs diff <= 1e-3", which is infeasible for two
+  FP16 paths whose GEMM and GEMV reduction orders differ. Approved by the human.)
 Kernel unit tests: each kernel vs its CPU reference on >= 20 random shapes including sizes that
   are not tile multiples and length-1 sequences; tolerance stated in the test.
 Performance claims: 5 warm-up and >= 20 timed iterations, CUDA events, L2 flushed for bandwidth

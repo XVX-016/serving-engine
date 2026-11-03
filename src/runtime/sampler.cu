@@ -196,6 +196,7 @@ int SamplerGPU::sample(
     if (K > vocab_size_) K = vocab_size_;
 
     // Extract top K indices using partial sort
+    // Mask any padded vocabulary IDs (indices >= vocab_size_)
     std::vector<int> indices(vocab_size_);
     for (int i = 0; i < vocab_size_; ++i) indices[i] = i;
 

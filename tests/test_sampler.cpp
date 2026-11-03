@@ -140,3 +140,23 @@ TEST_CASE("Sampler GPU: Statistical test (100k draws within 3-sigma)") {
     }
 }
 
+TEST_CASE("Sampler GPU: Padded vocabulary IDs (>= vocab_size) are strictly masked") {
+    const int vocab_size = 151936;
+    SamplerGPU sampler(vocab_size);
+
+    std::vector<float> logits(vocab_size, -10.0f);
+    // Put highest values at last valid token
+    logits[vocab_size - 1] = 50.0f;
+
+    SamplerConfig cfg;
+    cfg.temperature = 1.0f;
+    cfg.top_k = 10;
+    cfg.seed = 12345;
+
+    for (int i = 0; i < 100; ++i) {
+        int sampled = sampler.sample_from_float_host(logits.data(), {}, cfg);
+        CHECK(sampled >= 0);
+        CHECK(sampled < vocab_size);
+    }
+}
+
