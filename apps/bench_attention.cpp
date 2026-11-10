@@ -48,8 +48,10 @@ int main(int argc, char** argv) {
             std::vector<int> h_seq_lens(B, S);
             d_seq_lens.copy_from_host(h_seq_lens.data(), B);
 
-            // Up to 16 splits scratch buffer
-            size_t split_buffer_elems = 16 * B * num_q_heads * (head_dim + 2);
+            // Up to 64 splits scratch buffer (for S up to 4096 with SPLIT_CHUNK_SIZE=64..128)
+            int max_splits = (S + 64 - 1) / 64;
+            if (max_splits < 16) max_splits = 16;
+            size_t split_buffer_elems = static_cast<size_t>(max_splits) * B * num_q_heads * (head_dim + 2);
             DeviceBuffer<float> d_split_buf(split_buffer_elems);
 
             d_q.zero();

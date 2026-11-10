@@ -32,6 +32,8 @@ size_t TensorInfo::nbytes() const {
         case DataType::BF16:
         case DataType::F16: elem_size = 2; break;
         case DataType::F32: elem_size = 4; break;
+        case DataType::I8:
+        case DataType::U8:  elem_size = 1; break;
         default: elem_size = 1; break;
     }
     return static_cast<size_t>(numel()) * elem_size;
@@ -200,6 +202,10 @@ bool SafetensorsLoader::open(const std::string& filepath) {
                 info.dtype = DataType::F16;
             } else if (dtype_str == "F32") {
                 info.dtype = DataType::F32;
+            } else if (dtype_str == "I8") {
+                info.dtype = DataType::I8;
+            } else if (dtype_str == "U8") {
+                info.dtype = DataType::U8;
             } else {
                 info.dtype = DataType::UNKNOWN;
             }

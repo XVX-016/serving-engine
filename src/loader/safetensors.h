@@ -13,6 +13,8 @@ enum class DataType {
     BF16,
     F16,
     F32,
+    I8,
+    U8,
     UNKNOWN
 };
 

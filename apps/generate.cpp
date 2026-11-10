@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
     bool profile_step = false;
     bool profile_decode = false;
     bool bench_enqueue = false;
+    bool bench_prefill = false;
+    bool bench_decode = false;
     bool use_gpu = false;
     bool use_kv_cache = false;
     std::string model_path = "data/models/hf-cache/snapshots/7ae557604adf67be50417f59c2c2f167def9a775";
@@ -44,9 +46,21 @@ int main(int argc, char** argv) {
     float repetition_penalty = 1.0f;
     uint64_t seed = 42;
 
+    bool compute_ppl = false;
+    std::string ppl_tokens_file = "";
+    int ppl_max_len = 1024;
+    int ppl_stride = 512;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--time-load") {
+        if (arg == "--ppl-tokens" && i + 1 < argc) {
+            compute_ppl = true;
+            ppl_tokens_file = argv[++i];
+        } else if (arg == "--ppl-max-len" && i + 1 < argc) {
+            ppl_max_len = std::stoi(argv[++i]);
+        } else if (arg == "--ppl-stride" && i + 1 < argc) {
+            ppl_stride = std::stoi(argv[++i]);
+        } else if (arg == "--time-load") {
             time_load = true;
         } else if (arg == "--dump-all") {
             dump_all = true;
@@ -62,6 +76,10 @@ int main(int argc, char** argv) {
             profile_decode = true;
         } else if (arg == "--bench-enqueue") {
             bench_enqueue = true;
+        } else if (arg == "--bench-prefill") {
+            bench_prefill = true;
+        } else if (arg == "--bench-decode") {
+            bench_decode = true;
         } else if (arg == "--gpu") {
             use_gpu = true;
         } else if (arg == "--kv-cache") {
@@ -177,10 +195,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    bool is_quantized = loader.has_tensor("model.layers.0.self_attn.q_proj.weight.qweight");
     engine::ModelWeights weights;
-    if (!weights.load_and_validate(cfg, loader)) {
-        std::cerr << "Failed to validate model weights!" << std::endl;
-        return 1;
+    if (!is_quantized) {
+        if (!weights.load_and_validate(cfg, loader)) {
+            std::cerr << "Failed to validate model weights!" << std::endl;
+            return 1;
+        }
     }
 
     engine::BPETokenizer tokenizer;
@@ -190,7 +211,7 @@ int main(int argc, char** argv) {
     }
 
     // Convert weights to FP32 or GPU FP16 depending on mode
-    bool need_gpu = dump_all_gpu || verify_greedy_gpu || verify_kv_cache || profile_step || profile_decode || bench_enqueue || use_gpu;
+    bool need_gpu = dump_all_gpu || verify_greedy_gpu || verify_kv_cache || profile_step || profile_decode || bench_enqueue || bench_prefill || bench_decode || use_gpu || compute_ppl;
 
     engine::ModelWeightsFP32 weights_fp32;
     engine::ModelWeightsGPU weights_gpu;
@@ -201,8 +222,8 @@ int main(int argc, char** argv) {
 
     if (need_gpu) {
         CUBLAS_CHECK(cublasCreate(&cublas_handle));
-        if (!weights_gpu.init_from_weights(cfg, weights)) {
-            std::cerr << "Failed to upload and convert weights to GPU FP16!" << std::endl;
+        if (!weights_gpu.init_from_safetensors(cfg, loader)) {
+            std::cerr << "Failed to initialize GPU weights from safetensors!" << std::endl;
             return 1;
         }
         // Pre-allocate buffers for up to 4096 context length
@@ -214,6 +235,70 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to convert weights to FP32!" << std::endl;
             return 1;
         }
+    }
+
+    // Case PPL: compute perplexity via forward_gpu over sliding windows
+    if (compute_ppl) {
+        std::ifstream tf(ppl_tokens_file, std::ios::binary);
+        if (!tf.is_open()) {
+            std::cerr << "Failed to open ppl tokens file: " << ppl_tokens_file << std::endl;
+            return 1;
+        }
+        // Read uint32 or int64 tokens
+        uint32_t num_tokens = 0;
+        tf.read(reinterpret_cast<char*>(&num_tokens), sizeof(num_tokens));
+        std::vector<int32_t> raw_tokens(num_tokens);
+        tf.read(reinterpret_cast<char*>(raw_tokens.data()), num_tokens * sizeof(int32_t));
+        std::vector<int64_t> all_tokens(raw_tokens.begin(), raw_tokens.end());
+
+        double total_nll = 0.0;
+        int64_t total_predicted_tokens = 0;
+        int64_t seq_len = static_cast<int64_t>(all_tokens.size());
+        int64_t prev_end_loc = 0;
+
+        for (int64_t begin_loc = 0; begin_loc < seq_len; begin_loc += ppl_stride) {
+            int64_t end_loc = std::min(begin_loc + ppl_max_len, seq_len);
+            int64_t trg_len = end_loc - prev_end_loc;
+            int64_t cur_len = end_loc - begin_loc;
+
+            std::vector<int64_t> chunk(all_tokens.begin() + begin_loc, all_tokens.begin() + end_loc);
+            std::vector<float> logits = engine::forward_gpu(chunk, cfg, weights_gpu, buffers_gpu, cublas_handle);
+
+            // Cross-entropy over the last trg_len positions
+            // For token at pos t in chunk (which predicts chunk[t+1]):
+            // In Causal LM, logits at position p predicts target token at position p+1.
+            // Target tokens are from index (cur_len - trg_len) to (cur_len - 1).
+            // Their predicting logits are at index (cur_len - trg_len - 1) to (cur_len - 2).
+            for (int64_t t = cur_len - trg_len; t < cur_len; ++t) {
+                int64_t target_tok = chunk[t];
+                int64_t pred_pos = t - 1;
+                if (pred_pos < 0) continue; // First token has no predecessor in this chunk
+
+                const float* logit_row = logits.data() + pred_pos * cfg.vocab_size;
+
+                // Log-sum-exp over valid vocab
+                float max_val = -1e30f;
+                for (int v = 0; v < cfg.vocab_size; ++v) {
+                    if (logit_row[v] > max_val) max_val = logit_row[v];
+                }
+                double sum_exp = 0.0;
+                for (int v = 0; v < cfg.vocab_size; ++v) {
+                    sum_exp += std::exp(static_cast<double>(logit_row[v] - max_val));
+                }
+                double log_sum_exp = max_val + std::log(sum_exp);
+                double target_log_prob = static_cast<double>(logit_row[target_tok]) - log_sum_exp;
+
+                total_nll += (-target_log_prob);
+                total_predicted_tokens++;
+            }
+
+            prev_end_loc = end_loc;
+            if (end_loc == seq_len) break;
+        }
+
+        double ppl = std::exp(total_nll / total_predicted_tokens);
+        std::cout << "PPL_RESULT: " << ppl << " (tokens: " << total_predicted_tokens << ")" << std::endl;
+        return 0;
     }
 
     // Case 1a: dump-all reference prompts for compare.py (CPU)
@@ -598,6 +683,120 @@ int main(int argc, char** argv) {
 
         CUDA_CHECK(cudaEventDestroy(ev_start));
         CUDA_CHECK(cudaEventDestroy(ev_stop));
+        if (cublas_handle) cublasDestroy(cublas_handle);
+        return 0;
+    }
+
+    // Case 1c4: In-Process Prefill Benchmark (--bench-prefill)
+    if (bench_prefill) {
+        std::cout << "=== In-Process Prefill Benchmark (5 warmup + 20 timed iterations) ===\n";
+        std::vector<int> prompt_lens = {128, 512, 1024};
+        std::string base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. ";
+        std::vector<int> b_toks = tokenizer.encode(base_text, false);
+
+        for (int plen : prompt_lens) {
+            std::vector<int64_t> prompt_toks;
+            while (static_cast<int>(prompt_toks.size()) < plen) {
+                for (int t : b_toks) {
+                    if (static_cast<int>(prompt_toks.size()) < plen) prompt_toks.push_back(t);
+                    else break;
+                }
+            }
+
+            // Warmup
+            for (int w = 0; w < 5; ++w) {
+                kv_cache.set_current_seq_len(0);
+                engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+            }
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Timed
+            std::vector<float> times(20);
+            cudaEvent_t ev_start, ev_stop;
+            CUDA_CHECK(cudaEventCreate(&ev_start));
+            CUDA_CHECK(cudaEventCreate(&ev_stop));
+
+            for (int i = 0; i < 20; ++i) {
+                kv_cache.set_current_seq_len(0);
+                CUDA_CHECK(cudaEventRecord(ev_start));
+                engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+                CUDA_CHECK(cudaEventRecord(ev_stop));
+                CUDA_CHECK(cudaEventSynchronize(ev_stop));
+                float ms = 0.0f;
+                CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
+                times[i] = ms;
+            }
+            CUDA_CHECK(cudaEventDestroy(ev_start));
+            CUDA_CHECK(cudaEventDestroy(ev_stop));
+
+            std::sort(times.begin(), times.end());
+            float median_ms = times[10];
+            double tok_s = plen / (median_ms * 1e-3);
+            std::cout << "  Prefill P=" << plen << ": " << median_ms << " ms (" << tok_s << " tok/s) "
+                      << "Spread: [" << times.front() << ", " << times.back() << "] ms\n";
+        }
+        if (cublas_handle) cublasDestroy(cublas_handle);
+        return 0;
+    }
+
+    // Case 1c5: In-Process Decode Benchmark (--bench-decode)
+    if (bench_decode) {
+        std::cout << "=== In-Process Decode Benchmark (5 warmup + 20 timed iterations, 32 tokens) ===\n";
+        std::vector<int> decode_ctxs = {128, 512, 1024, 2048};
+        std::string base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. ";
+        std::vector<int> b_toks = tokenizer.encode(base_text, false);
+
+        for (int ctx : decode_ctxs) {
+            std::vector<int64_t> prompt_toks;
+            while (static_cast<int>(prompt_toks.size()) < ctx) {
+                for (int t : b_toks) {
+                    if (static_cast<int>(prompt_toks.size()) < ctx) prompt_toks.push_back(t);
+                    else break;
+                }
+            }
+
+            std::vector<float> step_times(20);
+            cudaEvent_t ev_start, ev_stop;
+            CUDA_CHECK(cudaEventCreate(&ev_start));
+            CUDA_CHECK(cudaEventCreate(&ev_stop));
+
+            // Warmup iterations
+            for (int w = 0; w < 5; ++w) {
+                kv_cache.set_current_seq_len(0);
+                engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+                int next_token = 100;
+                for (int s = 0; s < 32; ++s) {
+                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+                }
+            }
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Timed iterations
+            for (int iter = 0; iter < 20; ++iter) {
+                kv_cache.set_current_seq_len(0);
+                engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
+                CUDA_CHECK(cudaDeviceSynchronize());
+
+                int next_token = 100;
+                CUDA_CHECK(cudaEventRecord(ev_start));
+                for (int s = 0; s < 32; ++s) {
+                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+                }
+                CUDA_CHECK(cudaEventRecord(ev_stop));
+                CUDA_CHECK(cudaEventSynchronize(ev_stop));
+                float ms = 0.0f;
+                CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
+                step_times[iter] = ms / 32.0f; // per step
+            }
+            CUDA_CHECK(cudaEventDestroy(ev_start));
+            CUDA_CHECK(cudaEventDestroy(ev_stop));
+
+            std::sort(step_times.begin(), step_times.end());
+            float median_step_ms = step_times[10];
+            double tok_s = 1000.0 / median_step_ms;
+            std::cout << "  Decode Ctx=" << ctx << ": " << median_step_ms << " ms/step (" << tok_s << " tok/s) "
+                      << "Spread: [" << step_times.front() << ", " << step_times.back() << "] ms\n";
+        }
         if (cublas_handle) cublasDestroy(cublas_handle);
         return 0;
     }

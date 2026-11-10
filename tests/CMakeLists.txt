@@ -47,3 +47,9 @@ add_test(NAME test_attention COMMAND test_attention)
 set_tests_properties(test_attention PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 
+
+add_executable(test_quant test_quant.cpp)
+target_include_directories(test_quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(test_quant PRIVATE engine CUDA::cudart CUDA::cublas)
+add_test(NAME test_quant COMMAND test_quant)
+set_tests_properties(test_quant PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

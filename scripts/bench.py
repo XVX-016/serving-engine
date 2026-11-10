@@ -259,104 +259,69 @@ def benchmark_p3_gpu(prompt_len: int = 128, gen_tokens: int = 32, num_warmup: in
     }
 
 def benchmark_p4_gpu(prompt_lens=[128, 512, 1024], decode_ctxs=[128, 512, 1024, 2048], num_warmup=5, num_timed=20) -> dict:
+    """Benchmark prefill and decode using in-process warm loops (--bench-prefill / --bench-decode).
+
+    Each call to generate.exe runs all warmup + timed iterations inside a single
+    process using CUDA events, avoiding the cuBLAS JIT cold-start overhead that
+    plagued the old subprocess-per-iteration approach.
+    """
     print(f"\n=======================================================")
     print(f"=== Benchmarking Task P4: Prefill & Decode with KV Cache ===")
+    print(f"  (in-process warm loop via --bench-prefill / --bench-decode)")
     print(f"=======================================================\n")
-    import subprocess
-    base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. "
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    tokens = tokenizer.encode(base_text)
+    import subprocess, re
 
     results = {"prefill": {}, "decode": {}}
 
-    # 1. Prefill benchmarks (prompt 128, 512, 1024)
-    print("--- 1. Prefill Benchmarks (prompt=128, 512, 1024) ---")
-    for plen in prompt_lens:
-        mult = (plen // len(tokens)) + 1
-        input_ids = (tokens * mult)[:plen]
-        prompt_str = tokenizer.decode(input_ids, skip_special_tokens=True)
+    # 1. Prefill benchmarks — single invocation runs all prompt lengths
+    print("--- 1. Prefill Benchmarks (in-process, 5 warmup + 20 timed, CUDA events) ---")
+    csv_path = os.path.join(PROFILES_DIR, "p4_prefill_inprocess_nvml.csv")
+    with NVMLLogger(csv_path) as nvml_log:
+        proc = subprocess.run(
+            ["build\\generate.exe", "--bench-prefill"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+        )
+    nvml_summary = nvml_log.stop()
+    sm_clock = nvml_summary.get('median_sm_clock_mhz', 'N/A')
 
-        csv_path = os.path.join(PROFILES_DIR, f"p4_prefill_p{plen}_nvml.csv")
-        with NVMLLogger(csv_path) as nvml_log:
-            cmd = [
-                "build\\generate.exe",
-                "--kv-cache",
-                "--prompt", prompt_str,
-                "--max-new-tokens", "1"
-            ]
-            # Warmup
-            for _ in range(num_warmup):
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    # Parse output lines like: "  Prefill P=128: 18.48 ms (6928 tok/s) Spread: [17.9, 19.1] ms"
+    for line in proc.stdout.splitlines():
+        m = re.search(r'Prefill P=(\d+):\s+([\d.]+)\s+ms\s+\(([\d.]+)\s+tok/s\)', line)
+        if m:
+            plen = int(m.group(1))
+            median_ms = float(m.group(2))
+            tok_s = float(m.group(3))
+            print(f"  Prefill P={plen}: {median_ms:.2f} ms ({tok_s:.1f} tok/s), SM clock={sm_clock} MHz")
+            results["prefill"][plen] = {
+                "median_ms": median_ms,
+                "tok_s": tok_s,
+                "sm_clock": sm_clock
+            }
 
-            # Timed iterations
-            times = []
-            for _ in range(num_timed):
-                t0 = time.perf_counter()
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                t1 = time.perf_counter()
-                # Parse prefill time from output
-                for line in proc.stdout.splitlines():
-                    if "Timing: Prefill" in line:
-                        # e.g.: Timing: Prefill (128 tok): 12.34 ms
-                        parts = line.split(":")
-                        ms_str = parts[-1].split("ms")[0].strip()
-                        times.append(float(ms_str))
-                        break
-                if len(times) == 0:
-                    times.append((t1 - t0) * 1000.0)
+    # 2. Decode benchmarks — single invocation runs all context lengths
+    print("\n--- 2. Decode Benchmarks (in-process, 5 warmup + 20 timed, CUDA events, 32 steps/iter) ---")
+    csv_path = os.path.join(PROFILES_DIR, "p4_decode_inprocess_nvml.csv")
+    with NVMLLogger(csv_path) as nvml_log:
+        proc = subprocess.run(
+            ["build\\generate.exe", "--bench-decode"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+        )
+    nvml_summary = nvml_log.stop()
+    sm_clock = nvml_summary.get('median_sm_clock_mhz', 'N/A')
 
-        median_ms = float(np.median(times))
-        prefill_tok_s = (plen / (median_ms / 1000.0))
-        nvml_summary = nvml_log.stop()
-        sm_clock = nvml_summary.get('median_sm_clock_mhz', 'N/A')
-        print(f"  Prefill P={plen}: {median_ms:.2f} ms ({prefill_tok_s:.1f} tok/s), SM clock={sm_clock} MHz")
-        results["prefill"][plen] = {
-            "median_ms": median_ms,
-            "tok_s": prefill_tok_s,
-            "sm_clock": sm_clock
-        }
-
-    # 2. Decode benchmarks (context 128, 512, 1024, 2048)
-    print("\n--- 2. Decode Benchmarks (context=128, 512, 1024, 2048; gen=32) ---")
-    gen_tokens = 32
-    for ctx in decode_ctxs:
-        mult = (ctx // len(tokens)) + 1
-        input_ids = (tokens * mult)[:ctx]
-        prompt_str = tokenizer.decode(input_ids, skip_special_tokens=True)
-
-        csv_path = os.path.join(PROFILES_DIR, f"p4_decode_ctx{ctx}_nvml.csv")
-        with NVMLLogger(csv_path) as nvml_log:
-            cmd = [
-                "build\\generate.exe",
-                "--kv-cache",
-                "--prompt", prompt_str,
-                "--max-new-tokens", str(gen_tokens)
-            ]
-            # Warmup
-            for _ in range(num_warmup):
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-
-            # Timed iterations
-            step_times = []
-            for _ in range(num_timed):
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                for line in proc.stdout.splitlines():
-                    if "Decode (" in line and "ms/step" in line:
-                        # e.g.: Decode (31 steps): 200 ms (6.45 ms/step, 155.0 tok/s)
-                        step_part = line.split("ms/step")[0].split("(")[-1].strip()
-                        step_times.append(float(step_part))
-                        break
-
-        median_step_ms = float(np.median(step_times)) if step_times else 0.0
-        decode_tok_s = (1000.0 / median_step_ms) if median_step_ms > 0 else 0.0
-        nvml_summary = nvml_log.stop()
-        sm_clock = nvml_summary.get('median_sm_clock_mhz', 'N/A')
-        print(f"  Decode Ctx={ctx}: {median_step_ms:.2f} ms/step ({decode_tok_s:.1f} tok/s), SM clock={sm_clock} MHz")
-        results["decode"][ctx] = {
-            "median_step_ms": median_step_ms,
-            "tok_s": decode_tok_s,
-            "sm_clock": sm_clock
-        }
+    # Parse output lines like: "  Decode Ctx=128: 6.36 ms/step (157.1 tok/s) Spread: [6.1, 6.9] ms"
+    for line in proc.stdout.splitlines():
+        m = re.search(r'Decode Ctx=(\d+):\s+([\d.]+)\s+ms/step\s+\(([\d.]+)\s+tok/s\)', line)
+        if m:
+            ctx = int(m.group(1))
+            median_step_ms = float(m.group(2))
+            tok_s = float(m.group(3))
+            print(f"  Decode Ctx={ctx}: {median_step_ms:.2f} ms/step ({tok_s:.1f} tok/s), SM clock={sm_clock} MHz")
+            results["decode"][ctx] = {
+                "median_step_ms": median_step_ms,
+                "tok_s": tok_s,
+                "sm_clock": sm_clock
+            }
 
     return results
 

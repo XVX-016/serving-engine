@@ -2,34 +2,29 @@
 
 ## Decode Step Breakdown (Context = 517, Batch = 1, KV Cache Mode)
 
-- **Total Kernels Launched**: 435
-- **Host Wall Time**: 23.6101 ms
-- **GPU Busy Time**: 18.2694 ms
-- **Idle Gap Time**: 5.34066 ms (22.6202%)
+- **Total Kernels Launched**: 315
+- **Host Wall Time**: 19.7257 ms
+- **GPU Busy Time**: 14.4906 ms
+- **Idle Gap Time**: 5.23508 ms (26.5394%)
 - **Is Decode Launch-Bound?**: **YES (Launch Overhead Dominant)**
 
 ## Top Operations by Accumulated GPU Time
 
 | Rank | Kernel / Operation | Total Invocations | Total Time (ms) | % of GPU Time |
 |---|---|---|---|---|
-| 1 | `decode_attention` | 24 | 10.066 | 55.0977% |
-| 2 | `gate_proj` | 24 | 1.43402 | 7.84926% |
-| 3 | `up_proj` | 24 | 1.16979 | 6.403% |
-| 4 | `lm_head` | 1 | 1.12122 | 6.13711% |
-| 5 | `down_proj` | 24 | 1.05648 | 5.78277% |
-| 6 | `o_proj` | 24 | 0.542976 | 2.97205% |
-| 7 | `q_proj` | 24 | 0.477248 | 2.61227% |
-| 8 | `v_proj` | 24 | 0.36048 | 1.97313% |
-| 9 | `q_bias` | 24 | 0.33456 | 1.83125% |
-| 10 | `rope` | 24 | 0.289216 | 1.58306% |
-| 11 | `cache_append` | 24 | 0.2544 | 1.39249% |
-| 12 | `k_proj` | 24 | 0.22112 | 1.21033% |
-| 13 | `input_rmsnorm` | 24 | 0.160928 | 0.880859% |
-| 14 | `post_rmsnorm` | 24 | 0.149888 | 0.82043% |
-| 15 | `attn_residual` | 24 | 0.139072 | 0.761227% |
-| 16 | `k_bias` | 24 | 0.13552 | 0.741785% |
-| 17 | `swiglu` | 24 | 0.115104 | 0.630036% |
-| 18 | `mlp_residual` | 24 | 0.112064 | 0.613396% |
-| 19 | `v_bias` | 24 | 0.107264 | 0.587123% |
-| 20 | `embedding` | 1 | 0.016384 | 0.0896798% |
-| 21 | `final_rmsnorm` | 1 | 0.005664 | 0.0310026% |
+| 1 | `up_proj` | 24 | 1.53453 | 10.5898% |
+| 2 | `gate_proj` | 24 | 1.4711 | 10.1521% |
+| 3 | `decode_attention` | 24 | 1.39923 | 9.65612% |
+| 4 | `down_proj_residual` | 24 | 1.13187 | 7.81106% |
+| 5 | `swiglu` | 24 | 1.04371 | 7.20267% |
+| 6 | `rope` | 24 | 0.956864 | 6.60333% |
+| 7 | `input_rmsnorm` | 24 | 0.910496 | 6.28335% |
+| 8 | `post_rmsnorm` | 24 | 0.904896 | 6.2447% |
+| 9 | `v_proj` | 24 | 0.89568 | 6.1811% |
+| 10 | `q_proj` | 24 | 0.887264 | 6.12302% |
+| 11 | `o_proj_residual` | 24 | 0.842208 | 5.81209% |
+| 12 | `cache_append` | 24 | 0.841696 | 5.80856% |
+| 13 | `k_proj` | 24 | 0.84032 | 5.79906% |
+| 14 | `lm_head` | 1 | 0.655712 | 4.52508% |
+| 15 | `embedding` | 1 | 0.141888 | 0.979171% |
+| 16 | `final_rmsnorm` | 1 | 0.033152 | 0.228782% |

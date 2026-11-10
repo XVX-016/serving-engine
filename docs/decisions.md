@@ -43,3 +43,20 @@ The LM head projection operates on FP16 activations and FP16 tied embedding weig
 - However, for continuous batching (Task P10) and CUDA Graphs (Task P11), CPU synchronization on the decode loop is strictly prohibited.
 - Full GPU-native sampling (GPU top-$k$ via radix select / parallel bitonic select, GPU top-$p$ scan, and GPU RNG kernel without host round-trip) will be integrated directly into the CUDA Graph runner prior to P10/P11.
 
+
+
+---
+
+## 4. Weight-Only Quantization Formats (Task P8)
+
+### Decision:
+Support INT8 per-output-channel symmetric quantization and INT4 group size 128 (symmetric and asymmetric) with FP16 scale factors:
+1. **INT8 Per-Channel Symmetric**:
+   - Each row $n \in [0, N-1]$ of weight matrix $W \in \mathbb{R}^{N \times K}$ has scale $s[n] = \max_k |W[n, k]| / 127.0$.
+   - Weights stored as contiguous signed `int8_t`. Rows 16-byte aligned.
+2. **INT4 Grouped (G=128)**:
+   - Blocks of 128 consecutive elements along $K$ share an FP16 scale $s$ (and FP16 zero $z$ if asymmetric).
+   - Packed two 4-bit nibbles per byte: low nibble = even index $k$, high nibble = odd index $k+1$.
+   - Unpacking performed directly in registers during GEMV without materializing uncompressed weights in global memory.
+3. **Embedding / LM Head**:
+   - Kept in FP16 by default for maximum output distribution fidelity, with configurable INT8 option.

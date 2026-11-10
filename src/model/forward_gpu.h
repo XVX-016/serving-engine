@@ -11,16 +11,34 @@
 
 namespace engine {
 
-// GPU model weights: all FP16 on device
+enum class QuantMode {
+    FP16,
+    INT8,
+    INT4_G128
+};
+
+// Generic quantized or FP16 linear layer weight on GPU
+struct QuantWeightGPU {
+    DeviceBuffer<uint8_t> qweight; // [N, K] for INT8; [N, K/2] for INT4; empty for FP16
+    DeviceBuffer<half> scales;     // [N] for INT8; [N, K/group_size] for INT4
+    DeviceBuffer<half> fp16;       // [N, K] for FP16, or dequantized prefill scratch
+};
+
+// GPU model weights: supports FP16, INT8, and INT4
 struct ModelWeightsGPU {
-    DeviceBuffer<half> embed_tokens; // [vocab_size * hidden_size]
+    QuantMode quant_mode = QuantMode::FP16;
+    bool embed_is_quantized = false; // true if embed_tokens is stored quantized (INT8 head)
+
+    DeviceBuffer<half> embed_tokens; // [vocab_size * hidden_size] — FP16 embed (also used for embedding lookup)
+    QuantWeightGPU embed_quant;      // INT8 quantized embed_tokens for LM head GEMV (if embed_is_quantized)
     DeviceBuffer<half> final_norm;   // [hidden_size]
-    // lm_head is tied to embed_tokens (shares same buffer)
+    // lm_head is tied to embed_tokens (shares same buffer) unless embed_is_quantized
 
     struct LayerGPU {
         DeviceBuffer<half> input_layernorm;          // [hidden_size]
         DeviceBuffer<half> post_attention_layernorm; // [hidden_size]
 
+        // FP16 buffers
         DeviceBuffer<half> q_proj_weight; // [hidden_size * hidden_size]
         DeviceBuffer<half> q_proj_bias;   // [hidden_size]
         DeviceBuffer<half> k_proj_weight; // [kv_dim * hidden_size]
@@ -32,12 +50,24 @@ struct ModelWeightsGPU {
         DeviceBuffer<half> gate_proj_weight; // [intermediate_size * hidden_size]
         DeviceBuffer<half> up_proj_weight;   // [intermediate_size * hidden_size]
         DeviceBuffer<half> down_proj_weight; // [hidden_size * intermediate_size]
+
+        // Quantized weight representations (INT8 or INT4)
+        QuantWeightGPU q_proj_quant;
+        QuantWeightGPU k_proj_quant;
+        QuantWeightGPU v_proj_quant;
+        QuantWeightGPU o_proj_quant;
+        QuantWeightGPU gate_proj_quant;
+        QuantWeightGPU up_proj_quant;
+        QuantWeightGPU down_proj_quant;
     };
 
     std::vector<LayerGPU> layers;
 
     // Convert BF16 weights from safetensors mmap to FP16 on GPU
     bool init_from_weights(const ModelConfig& config, const ModelWeights& weights);
+
+    // Load directly from safetensors loader (handles FP16, INT8, INT4)
+    bool init_from_safetensors(const ModelConfig& config, const SafetensorsLoader& loader);
 };
 
 // Pre-allocated activation buffers on GPU (allocated once for max_seq_len)

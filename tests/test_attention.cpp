@@ -120,8 +120,10 @@ TEST_CASE("CUDA Kernel Test: decode_gqa_split vs CPU Reference (random shapes, l
         // GPU execution
         DeviceBuffer<half> d_q(q_size), d_k(kv_size), d_v(kv_size), d_out(q_size);
         DeviceBuffer<int> d_seq_lens(batch_size);
-        // Scratch buffer for splits: up to 8 splits
-        size_t split_buffer_elems = 8 * batch_size * num_q_heads * (head_dim + 2);
+        // Scratch buffer for splits: up to 64 splits
+        int num_splits = (max_seq + 64 - 1) / 64;
+        if (num_splits < 16) num_splits = 16;
+        size_t split_buffer_elems = static_cast<size_t>(num_splits) * batch_size * num_q_heads * (head_dim + 2);
         DeviceBuffer<float> d_split_buf(split_buffer_elems);
 
         d_q.copy_from_host(q_h.data(), q_size);

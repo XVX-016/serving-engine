@@ -7,3 +7,11 @@ __pycache__/
 *.lib
 *.exe
 
+# Reports and temporary profiles / spreadsheets
+docs/reports/
+*.xlsx
+*.nsys-rep
+*.qdstrm
+*.sqlite
+
+
