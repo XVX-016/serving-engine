@@ -60,3 +60,25 @@ Support INT8 per-output-channel symmetric quantization and INT4 group size 128 (
    - Unpacking performed directly in registers during GEMV without materializing uncompressed weights in global memory.
 3. **Embedding / LM Head**:
    - Kept in FP16 by default for maximum output distribution fidelity, with configurable INT8 option.
+
+
+---
+
+## 5. Decode GEMV Kernels: Legacy Magic-Number vs __dp4a with Dynamic Activation Quantization (Task P8c)
+
+### Context:
+Task P8c evaluated migrating quantized decode GEMVs (INT8 and INT4 g128) to use `__dp4a` SIMD integer dot products fed by dynamic INT8 activation quantization with 16-byte vectorized loads, comparing against the previous "magic number" FP16 dequantization kernels.
+
+### Findings:
+1. **Instruction Efficiency**:
+   - `__dp4a` reduced instructions per weight for INT4 `gate_proj` from **23.97 inst/weight** down to **~2.53 inst/weight** (~10× reduction).
+2. **End-to-End Latency & Roofline Efficiency**:
+   - Despite lower arithmetic instruction counts, dynamic activation quantization introduces 4 extra `quantize_activation_int8` kernel launches per layer across 24 layers (+96 launches/step, increasing total launches from 315 to 411).
+   - The stripped-compute test with L2 cache flushing reached **364 GB/s (159% of roofline)**, and NCU warp stall analysis showed **55.4% long_scoreboard stalls** vs only **4.5% math_pipe_throttle**, proving memory latency and launch bubble overhead dominate.
+   - Consequently, the legacy FP16-activation GEMV path achieved lower end-to-end decode step times:
+     - INT8: **4.14 ms** (legacy) vs **4.60 ms** (dp4a)
+     - INT4: **4.36 ms** (legacy) vs **4.72 ms** (dp4a)
+
+### Decision:
+- **Default path**: Keep **legacy GEMVs (`--legacy-gemv`) enabled by default** in both CLI and model runner interfaces to deliver maximum performance.
+- **Experimental flag**: Retain `__dp4a` SIMD kernels and activation quantization accessible via `--dp4a-gemv` for future fused kernel architectures (e.g. fused RMSNorm-activation quantization and fused QKV / gate+up projection megakernels).

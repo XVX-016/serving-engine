@@ -88,6 +88,11 @@ struct ActivationBuffersGPU {
     DeviceBuffer<int> decode_seq_len; // [1] sequence length for decode
     DeviceBuffer<float> split_kv_buf; // [splits * heads * head_dim]
 
+    // INT8 Activation Quantization Buffers (Task P8c)
+    DeviceBuffer<int8_t> q8_act_H;    // [hidden_size] quantized activations for projections from H
+    DeviceBuffer<int8_t> q8_act_inter;// [intermediate_size] quantized activations for down_proj
+    DeviceBuffer<float> act_scale;    // [1] per-vector activation scale
+
     int64_t max_seq = 0;
 
     void allocate(const ModelConfig& config, int64_t max_seq_len);
@@ -139,7 +144,8 @@ std::vector<float> decode_step_gpu(
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
     float* d_last_logits = nullptr,
-    std::vector<KernelRecord>* profile_records = nullptr
+    std::vector<KernelRecord>* profile_records = nullptr,
+    bool use_legacy_gemv = true
 );
 
 } // namespace engine

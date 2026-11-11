@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     bool bench_decode = false;
     bool use_gpu = false;
     bool use_kv_cache = false;
+    bool use_legacy_gemv = true; // Task P8c: Legacy GEMVs are default because dp4a+act_quant has higher latency
     std::string model_path = "data/models/hf-cache/snapshots/7ae557604adf67be50417f59c2c2f167def9a775";
     std::string prompt = "";
     int max_new_tokens = 32;
@@ -85,6 +86,10 @@ int main(int argc, char** argv) {
         } else if (arg == "--kv-cache") {
             use_gpu = true;
             use_kv_cache = true;
+        } else if (arg == "--legacy-gemv") {
+            use_legacy_gemv = true;
+        } else if (arg == "--dp4a-gemv") {
+            use_legacy_gemv = false;
         } else if (arg == "--temperature" && i + 1 < argc) {
             temperature = std::stof(argv[++i]);
         } else if (arg == "--top-k" && i + 1 < argc) {
@@ -529,7 +534,7 @@ int main(int argc, char** argv) {
         // Warmup 5 decode steps
         int next_token = 100;
         for (int w = 0; w < 5; ++w) {
-            engine::decode_step_gpu(next_token, 512 + w, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+            engine::decode_step_gpu(next_token, 512 + w, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -538,7 +543,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaEventCreate(&ev_step_start));
         CUDA_CHECK(cudaEventCreate(&ev_step_stop));
         CUDA_CHECK(cudaEventRecord(ev_step_start));
-        engine::decode_step_gpu(next_token, 517, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+        engine::decode_step_gpu(next_token, 517, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
         CUDA_CHECK(cudaEventRecord(ev_step_stop));
         CUDA_CHECK(cudaEventSynchronize(ev_step_stop));
         float unprofiled_gpu_ms = 0.0f;
@@ -548,7 +553,7 @@ int main(int argc, char** argv) {
 
         std::vector<engine::KernelRecord> records;
         auto t_wall_start = std::chrono::high_resolution_clock::now();
-        engine::decode_step_gpu(next_token, 517, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, nullptr, &records);
+        engine::decode_step_gpu(next_token, 517, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, nullptr, &records, use_legacy_gemv);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t_wall_end = std::chrono::high_resolution_clock::now();
         double wall_ms = std::chrono::duration<double, std::milli>(t_wall_end - t_wall_start).count();
@@ -766,7 +771,7 @@ int main(int argc, char** argv) {
                 engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
                 int next_token = 100;
                 for (int s = 0; s < 32; ++s) {
-                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
                 }
             }
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -780,7 +785,7 @@ int main(int argc, char** argv) {
                 int next_token = 100;
                 CUDA_CHECK(cudaEventRecord(ev_start));
                 for (int s = 0; s < 32; ++s) {
-                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data());
+                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
                 }
                 CUDA_CHECK(cudaEventRecord(ev_stop));
                 CUDA_CHECK(cudaEventSynchronize(ev_stop));
@@ -1091,7 +1096,8 @@ int main(int argc, char** argv) {
             if (sampled_token == 151645) break;
 
             std::vector<float> decode_logits = engine::decode_step_gpu(
-                sampled_token, current_pos, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle
+                sampled_token, current_pos, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle,
+                nullptr, nullptr, use_legacy_gemv
             );
 
             sampled_token = sampler.sample_from_float_host(decode_logits.data(), tokens, sampler_cfg);

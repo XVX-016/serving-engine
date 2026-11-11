@@ -50,6 +50,12 @@
 | P8b  | Decode NCU Profile: INT4 g128 (Ctx 512) | 1 | 512 | 1 | - | 5.45 ms (NCU sum 5.36 ms) | 183.4 | 435.8 MiB | Gap +0.09 ms (1.6%) | 456.92 MB read traffic (2.00 ms ceiling, 40.3% of ceiling). Linear GEMV 4.60 ms (85.8%). Unpacking ALU pipeline bound (57.5% ALU active, 21.9% DRAM throughput). |
 | P8b  | Prefill Quantized: INT8 (P=512) | 1 | 512 | - | 6181 | - | - | 656 MB | - | `build\generate.exe --model data/models/qwen2.5-0.5b-int8 --bench-prefill`. 82.84 ms median. |
 | P8b  | Prefill Quantized: INT4 g128 (P=512) | 1 | 512 | - | 6431 | - | - | 490 MB | - | `build\generate.exe --model data/models/qwen2.5-0.5b-int4-g128 --bench-prefill`. 79.62 ms median. |
+| P8c  | Interleaved Decode: llama.cpp Q8_0 (Ctx 128) | 1 | 128 | 32 | - | 3.05 ms | 328.1 | 525.1 MB | - | 2.30 ms roofline ceiling (75.5% of roofline). 3-round interleaved session. |
+| P8c  | Interleaved Decode: llama.cpp Q4_K_M (Ctx 128) | 1 | 128 | 32 | - | 2.70 ms | 370.2 | 391.9 MB | - | 1.72 ms roofline ceiling (63.6% of roofline). 3-round interleaved session. |
+| P8c  | Interleaved Decode: Engine INT8 + INT8 head (Ctx 128) | 1 | 128 | 32 | - | 4.40 ms | 227.5 | 494.0 MB | - | 2.17 ms roofline ceiling (49.3% of roofline, 112.4 GB/s). Legacy default path. |
+| P8c  | Interleaved Decode: Engine INT4 g128 + INT8 head (Ctx 128) | 1 | 128 | 32 | - | 4.41 ms | 226.7 | 320.0 MB | - | 1.40 ms roofline ceiling (31.8% of roofline, 72.6 GB/s). Legacy default path. |
+| P8c  | Experimental Decode: Engine INT8 dp4a (Ctx 128) | 1 | 128 | 32 | - | 4.60 ms | 217.4 | 494.0 MB | - | +96 act quant launches (+0.35 ms) negate per-weight inst reduction. |
+| P8c  | Experimental Decode: Engine INT4 g128 dp4a (Ctx 128) | 1 | 128 | 32 | - | 4.72 ms | 211.9 | 320.0 MB | - | Inst/wt dropped from 24 to 2.53, but long_scoreboard stalls (55.4%) dominate. |
 | P9   | INT8, FP8, INT4 KV | 32 | | | | | | | ppl: | |
 | P10  | Paged KV + batching | 1, 4, 8, 16 | | | | | | | | |
 | P11  | CUDA graphs | 1, 8 | | | | | | | | |

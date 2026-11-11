@@ -218,7 +218,17 @@ void gemv_residual(
     cudaStream_t stream = 0
 );
 
-// 11. Quantized INT8 / INT4 GEMV Kernels & Dequantization (Task P8)
+// 11. Quantized INT8 / INT4 GEMV Kernels & Dequantization (Task P8 / P8c)
+// Activation Quantization: quantizes FP16 vector x to INT8 symmetric with per-vector scale:
+// scale = max(|x|) / 127.0f, x_q = round(x / scale)
+void quantize_activation_int8(
+    const half* x,
+    int8_t* x_q,
+    float* scale,
+    int K,
+    cudaStream_t stream = 0
+);
+
 void gemv_int8(
     const int8_t* W_q,
     const half* scales,
@@ -251,13 +261,93 @@ void gemv_int8_residual(
     cudaStream_t stream = 0
 );
 
-// 11b. INT8 GEMV with FP32 output (for LM head logits)
-//      y_f32[n] = sum_k(W_q[n,k] * scales[n] * x[k])
 void gemv_int8_f32(
     const int8_t* W_q,
     const half* scales,
     const half* x,
     float* y_f32,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+// 11c. Fast SIMD dp4a GEMV Kernels with INT8 Activation Quantization (Task P8c)
+void gemv_int8_dp4a(
+    const int8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int8_dp4a_bias(
+    const int8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    const half* b,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int8_dp4a_residual(
+    const int8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    const half* r,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int8_dp4a_f32(
+    const int8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    float* y_f32,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int4_g128_dp4a(
+    const uint8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int4_g128_dp4a_bias(
+    const uint8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    const half* b,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream = 0
+);
+
+void gemv_int4_g128_dp4a_residual(
+    const uint8_t* W_q,
+    const half* scales,
+    const int8_t* x_q,
+    const float* x_scale,
+    const half* r,
+    half* y,
     int N,
     int K,
     cudaStream_t stream = 0

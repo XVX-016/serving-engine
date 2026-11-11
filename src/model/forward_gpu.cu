@@ -257,6 +257,10 @@ void ActivationBuffersGPU::allocate(const ModelConfig& config, int64_t max_seq_l
     token_ids_d.allocate(max_seq);
     decode_seq_len.allocate(1);
     split_kv_buf.allocate(64 * 14 * (config.head_dim + 2));
+
+    q8_act_H.allocate(H);
+    q8_act_inter.allocate(inter);
+    act_scale.allocate(1);
 }
 
 // ---- Helper: download FP16 device to host FP32 for npy dump ----
@@ -706,7 +710,8 @@ std::vector<float> decode_step_gpu(
     KVCache& kv_cache,
     cublasHandle_t cublas_handle,
     float* d_last_logits,
-    std::vector<KernelRecord>* profile_records
+    std::vector<KernelRecord>* profile_records,
+    bool use_legacy_gemv
 ) {
     int64_t H = config.hidden_size;
     int64_t num_q_heads = config.num_attention_heads;
@@ -748,18 +753,41 @@ std::vector<float> decode_step_gpu(
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps);
         timed_end(lp + "input_rmsnorm");
 
+        // If using dp4a, quantize norm_out activation vector to INT8
+        bool do_dp4a = !use_legacy_gemv && (weights.quant_mode == QuantMode::INT8 || weights.quant_mode == QuantMode::INT4_G128);
+        if (do_dp4a) {
+            timed_begin(lp + "quant_act_norm");
+            cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
+                                           buffers.act_scale.data(), static_cast<int>(H));
+            timed_end(lp + "quant_act_norm");
+        }
+
         // 2b. Q/K/V projections (M=1) — custom GEMV with fused bias
         timed_begin(lp + "q_proj");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.q_proj_quant.qweight.data()),
-                                lw.q_proj_quant.scales.data(), buffers.norm_out.data(),
-                                lw.q_proj_bias.data(), buffers.q.data(),
-                                static_cast<int>(H), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a_bias(reinterpret_cast<const int8_t*>(lw.q_proj_quant.qweight.data()),
+                                         lw.q_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                         buffers.act_scale.data(), lw.q_proj_bias.data(), buffers.q.data(),
+                                         static_cast<int>(H), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.q_proj_quant.qweight.data()),
+                                    lw.q_proj_quant.scales.data(), buffers.norm_out.data(),
+                                    lw.q_proj_bias.data(), buffers.q.data(),
+                                    static_cast<int>(H), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128_bias(lw.q_proj_quant.qweight.data(),
-                                     lw.q_proj_quant.scales.data(), buffers.norm_out.data(),
-                                     lw.q_proj_bias.data(), buffers.q.data(),
-                                     static_cast<int>(H), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a_bias(lw.q_proj_quant.qweight.data(),
+                                              lw.q_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                              buffers.act_scale.data(), lw.q_proj_bias.data(), buffers.q.data(),
+                                              static_cast<int>(H), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128_bias(lw.q_proj_quant.qweight.data(),
+                                         lw.q_proj_quant.scales.data(), buffers.norm_out.data(),
+                                         lw.q_proj_bias.data(), buffers.q.data(),
+                                         static_cast<int>(H), static_cast<int>(H));
+            }
         } else {
             cuda::gemv_bias(lw.q_proj_weight.data(), buffers.norm_out.data(),
                             lw.q_proj_bias.data(), buffers.q.data(),
@@ -769,15 +797,29 @@ std::vector<float> decode_step_gpu(
 
         timed_begin(lp + "k_proj");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.k_proj_quant.qweight.data()),
-                                lw.k_proj_quant.scales.data(), buffers.norm_out.data(),
-                                lw.k_proj_bias.data(), buffers.k.data(),
-                                static_cast<int>(kv_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a_bias(reinterpret_cast<const int8_t*>(lw.k_proj_quant.qweight.data()),
+                                         lw.k_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                         buffers.act_scale.data(), lw.k_proj_bias.data(), buffers.k.data(),
+                                         static_cast<int>(kv_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.k_proj_quant.qweight.data()),
+                                    lw.k_proj_quant.scales.data(), buffers.norm_out.data(),
+                                    lw.k_proj_bias.data(), buffers.k.data(),
+                                    static_cast<int>(kv_dim), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128_bias(lw.k_proj_quant.qweight.data(),
-                                     lw.k_proj_quant.scales.data(), buffers.norm_out.data(),
-                                     lw.k_proj_bias.data(), buffers.k.data(),
-                                     static_cast<int>(kv_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a_bias(lw.k_proj_quant.qweight.data(),
+                                              lw.k_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                              buffers.act_scale.data(), lw.k_proj_bias.data(), buffers.k.data(),
+                                              static_cast<int>(kv_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128_bias(lw.k_proj_quant.qweight.data(),
+                                         lw.k_proj_quant.scales.data(), buffers.norm_out.data(),
+                                         lw.k_proj_bias.data(), buffers.k.data(),
+                                         static_cast<int>(kv_dim), static_cast<int>(H));
+            }
         } else {
             cuda::gemv_bias(lw.k_proj_weight.data(), buffers.norm_out.data(),
                             lw.k_proj_bias.data(), buffers.k.data(),
@@ -787,15 +829,29 @@ std::vector<float> decode_step_gpu(
 
         timed_begin(lp + "v_proj");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.v_proj_quant.qweight.data()),
-                                lw.v_proj_quant.scales.data(), buffers.norm_out.data(),
-                                lw.v_proj_bias.data(), buffers.v.data(),
-                                static_cast<int>(kv_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a_bias(reinterpret_cast<const int8_t*>(lw.v_proj_quant.qweight.data()),
+                                         lw.v_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                         buffers.act_scale.data(), lw.v_proj_bias.data(), buffers.v.data(),
+                                         static_cast<int>(kv_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8_bias(reinterpret_cast<const int8_t*>(lw.v_proj_quant.qweight.data()),
+                                    lw.v_proj_quant.scales.data(), buffers.norm_out.data(),
+                                    lw.v_proj_bias.data(), buffers.v.data(),
+                                    static_cast<int>(kv_dim), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128_bias(lw.v_proj_quant.qweight.data(),
-                                     lw.v_proj_quant.scales.data(), buffers.norm_out.data(),
-                                     lw.v_proj_bias.data(), buffers.v.data(),
-                                     static_cast<int>(kv_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a_bias(lw.v_proj_quant.qweight.data(),
+                                              lw.v_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                              buffers.act_scale.data(), lw.v_proj_bias.data(), buffers.v.data(),
+                                              static_cast<int>(kv_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128_bias(lw.v_proj_quant.qweight.data(),
+                                         lw.v_proj_quant.scales.data(), buffers.norm_out.data(),
+                                         lw.v_proj_bias.data(), buffers.v.data(),
+                                         static_cast<int>(kv_dim), static_cast<int>(H));
+            }
         } else {
             cuda::gemv_bias(lw.v_proj_weight.data(), buffers.norm_out.data(),
                             lw.v_proj_bias.data(), buffers.v.data(),
@@ -853,18 +909,42 @@ std::vector<float> decode_step_gpu(
         );
         timed_end(lp + "decode_attention");
 
+        // Quantize attn_out to INT8 if do_dp4a
+        if (do_dp4a) {
+            timed_begin(lp + "quant_act_attn");
+            cuda::quantize_activation_int8(buffers.attn_out.data(), buffers.q8_act_H.data(),
+                                           buffers.act_scale.data(), static_cast<int>(H));
+            timed_end(lp + "quant_act_attn");
+        }
+
         // 2e. Output projection (M=1) fused with residual add into hidden_states
         timed_begin(lp + "o_proj_residual");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8_residual(reinterpret_cast<const int8_t*>(lw.o_proj_quant.qweight.data()),
-                                    lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
-                                    buffers.hidden_states.data(), buffers.hidden_states.data(),
-                                    static_cast<int>(H), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a_residual(reinterpret_cast<const int8_t*>(lw.o_proj_quant.qweight.data()),
+                                             lw.o_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                             buffers.act_scale.data(), buffers.hidden_states.data(),
+                                             buffers.hidden_states.data(),
+                                             static_cast<int>(H), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8_residual(reinterpret_cast<const int8_t*>(lw.o_proj_quant.qweight.data()),
+                                        lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
+                                        buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                        static_cast<int>(H), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128_residual(lw.o_proj_quant.qweight.data(),
-                                         lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
-                                         buffers.hidden_states.data(), buffers.hidden_states.data(),
-                                         static_cast<int>(H), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a_residual(lw.o_proj_quant.qweight.data(),
+                                                  lw.o_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                                  buffers.act_scale.data(), buffers.hidden_states.data(),
+                                                  buffers.hidden_states.data(),
+                                                  static_cast<int>(H), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128_residual(lw.o_proj_quant.qweight.data(),
+                                             lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
+                                             buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                             static_cast<int>(H), static_cast<int>(H));
+            }
         } else {
             cuda::gemv_residual(lw.o_proj_weight.data(), buffers.attn_out.data(),
                                 buffers.hidden_states.data(), buffers.hidden_states.data(),
@@ -878,18 +958,40 @@ std::vector<float> decode_step_gpu(
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps);
         timed_end(lp + "post_rmsnorm");
 
+        // Quantize post_norm_out to INT8 if do_dp4a
+        if (do_dp4a) {
+            timed_begin(lp + "quant_act_post_norm");
+            cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
+                                           buffers.act_scale.data(), static_cast<int>(H));
+            timed_end(lp + "quant_act_post_norm");
+        }
+
         // 3b. Gate & Up projections (M=1) — custom GEMV
         timed_begin(lp + "gate_proj");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8(reinterpret_cast<const int8_t*>(lw.gate_proj_quant.qweight.data()),
-                           lw.gate_proj_quant.scales.data(), buffers.norm_out.data(),
-                           buffers.gate.data(),
-                           static_cast<int>(inter_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a(reinterpret_cast<const int8_t*>(lw.gate_proj_quant.qweight.data()),
+                                    lw.gate_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                    buffers.act_scale.data(), buffers.gate.data(),
+                                    static_cast<int>(inter_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8(reinterpret_cast<const int8_t*>(lw.gate_proj_quant.qweight.data()),
+                               lw.gate_proj_quant.scales.data(), buffers.norm_out.data(),
+                               buffers.gate.data(),
+                               static_cast<int>(inter_dim), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128(lw.gate_proj_quant.qweight.data(),
-                                lw.gate_proj_quant.scales.data(), buffers.norm_out.data(),
-                                buffers.gate.data(),
-                                static_cast<int>(inter_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a(lw.gate_proj_quant.qweight.data(),
+                                         lw.gate_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                         buffers.act_scale.data(), buffers.gate.data(),
+                                         static_cast<int>(inter_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128(lw.gate_proj_quant.qweight.data(),
+                                    lw.gate_proj_quant.scales.data(), buffers.norm_out.data(),
+                                    buffers.gate.data(),
+                                    static_cast<int>(inter_dim), static_cast<int>(H));
+            }
         } else {
             cuda::gemv(lw.gate_proj_weight.data(), buffers.norm_out.data(),
                        buffers.gate.data(),
@@ -899,15 +1001,29 @@ std::vector<float> decode_step_gpu(
 
         timed_begin(lp + "up_proj");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8(reinterpret_cast<const int8_t*>(lw.up_proj_quant.qweight.data()),
-                           lw.up_proj_quant.scales.data(), buffers.norm_out.data(),
-                           buffers.up.data(),
-                           static_cast<int>(inter_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a(reinterpret_cast<const int8_t*>(lw.up_proj_quant.qweight.data()),
+                                    lw.up_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                    buffers.act_scale.data(), buffers.up.data(),
+                                    static_cast<int>(inter_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int8(reinterpret_cast<const int8_t*>(lw.up_proj_quant.qweight.data()),
+                               lw.up_proj_quant.scales.data(), buffers.norm_out.data(),
+                               buffers.up.data(),
+                               static_cast<int>(inter_dim), static_cast<int>(H));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128(lw.up_proj_quant.qweight.data(),
-                                lw.up_proj_quant.scales.data(), buffers.norm_out.data(),
-                                buffers.up.data(),
-                                static_cast<int>(inter_dim), static_cast<int>(H));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a(lw.up_proj_quant.qweight.data(),
+                                         lw.up_proj_quant.scales.data(), buffers.q8_act_H.data(),
+                                         buffers.act_scale.data(), buffers.up.data(),
+                                         static_cast<int>(inter_dim), static_cast<int>(H));
+            } else {
+                cuda::gemv_int4_g128(lw.up_proj_quant.qweight.data(),
+                                    lw.up_proj_quant.scales.data(), buffers.norm_out.data(),
+                                    buffers.up.data(),
+                                    static_cast<int>(inter_dim), static_cast<int>(H));
+            }
         } else {
             cuda::gemv(lw.up_proj_weight.data(), buffers.norm_out.data(),
                        buffers.up.data(),
@@ -921,18 +1037,42 @@ std::vector<float> decode_step_gpu(
                     buffers.act.data(), inter_dim);
         timed_end(lp + "swiglu");
 
+        // Quantize act (SwiGLU output [inter_dim]) to INT8 if do_dp4a
+        if (do_dp4a) {
+            timed_begin(lp + "quant_act_mlp");
+            cuda::quantize_activation_int8(buffers.act.data(), buffers.q8_act_inter.data(),
+                                           buffers.act_scale.data(), static_cast<int>(inter_dim));
+            timed_end(lp + "quant_act_mlp");
+        }
+
         // 3d. Down projection fused with residual add into hidden_states
         timed_begin(lp + "down_proj_residual");
         if (weights.quant_mode == QuantMode::INT8) {
-            cuda::gemv_int8_residual(reinterpret_cast<const int8_t*>(lw.down_proj_quant.qweight.data()),
-                                    lw.down_proj_quant.scales.data(), buffers.act.data(),
-                                    buffers.hidden_states.data(), buffers.hidden_states.data(),
-                                    static_cast<int>(H), static_cast<int>(inter_dim));
+            if (do_dp4a) {
+                cuda::gemv_int8_dp4a_residual(reinterpret_cast<const int8_t*>(lw.down_proj_quant.qweight.data()),
+                                             lw.down_proj_quant.scales.data(), buffers.q8_act_inter.data(),
+                                             buffers.act_scale.data(), buffers.hidden_states.data(),
+                                             buffers.hidden_states.data(),
+                                             static_cast<int>(H), static_cast<int>(inter_dim));
+            } else {
+                cuda::gemv_int8_residual(reinterpret_cast<const int8_t*>(lw.down_proj_quant.qweight.data()),
+                                        lw.down_proj_quant.scales.data(), buffers.act.data(),
+                                        buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                        static_cast<int>(H), static_cast<int>(inter_dim));
+            }
         } else if (weights.quant_mode == QuantMode::INT4_G128) {
-            cuda::gemv_int4_g128_residual(lw.down_proj_quant.qweight.data(),
-                                         lw.down_proj_quant.scales.data(), buffers.act.data(),
-                                         buffers.hidden_states.data(), buffers.hidden_states.data(),
-                                         static_cast<int>(H), static_cast<int>(inter_dim));
+            if (do_dp4a) {
+                cuda::gemv_int4_g128_dp4a_residual(lw.down_proj_quant.qweight.data(),
+                                                  lw.down_proj_quant.scales.data(), buffers.q8_act_inter.data(),
+                                                  buffers.act_scale.data(), buffers.hidden_states.data(),
+                                                  buffers.hidden_states.data(),
+                                                  static_cast<int>(H), static_cast<int>(inter_dim));
+            } else {
+                cuda::gemv_int4_g128_residual(lw.down_proj_quant.qweight.data(),
+                                             lw.down_proj_quant.scales.data(), buffers.act.data(),
+                                             buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                             static_cast<int>(H), static_cast<int>(inter_dim));
+            }
         } else {
             cuda::gemv_residual(lw.down_proj_weight.data(), buffers.act.data(),
                                 buffers.hidden_states.data(), buffers.hidden_states.data(),
@@ -953,13 +1093,26 @@ std::vector<float> decode_step_gpu(
     float* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
     timed_begin("lm_head");
     if (weights.embed_is_quantized) {
-        // INT8 GEMV directly to FP32 logits
-        cuda::gemv_int8_f32(
-            reinterpret_cast<const int8_t*>(weights.embed_quant.qweight.data()),
-            weights.embed_quant.scales.data(),
-            buffers.norm_out.data(),
-            target_logits,
-            static_cast<int>(V), static_cast<int>(H));
+        if (!use_legacy_gemv) {
+            // Quantize final norm_out for dp4a LM head
+            cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
+                                           buffers.act_scale.data(), static_cast<int>(H));
+            cuda::gemv_int8_dp4a_f32(
+                reinterpret_cast<const int8_t*>(weights.embed_quant.qweight.data()),
+                weights.embed_quant.scales.data(),
+                buffers.q8_act_H.data(),
+                buffers.act_scale.data(),
+                target_logits,
+                static_cast<int>(V), static_cast<int>(H));
+        } else {
+            // Legacy GEMV directly to FP32 logits
+            cuda::gemv_int8_f32(
+                reinterpret_cast<const int8_t*>(weights.embed_quant.qweight.data()),
+                weights.embed_quant.scales.data(),
+                buffers.norm_out.data(),
+                target_logits,
+                static_cast<int>(V), static_cast<int>(H));
+        }
     } else {
         cuda::matmul_transB_f32(cublas_handle, buffers.norm_out.data(),
                                weights.embed_tokens.data(), target_logits,
