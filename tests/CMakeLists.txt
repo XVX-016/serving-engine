@@ -53,3 +53,9 @@ target_include_directories(test_quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(test_quant PRIVATE engine CUDA::cudart CUDA::cublas)
 add_test(NAME test_quant COMMAND test_quant)
 set_tests_properties(test_quant PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(bench_launch_floor bench_launch_floor.cu)
+target_include_directories(bench_launch_floor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(bench_launch_floor PRIVATE engine CUDA::cudart CUDA::cublas)
+set_target_properties(bench_launch_floor PROPERTIES CUDA_ARCHITECTURES "89")
+
