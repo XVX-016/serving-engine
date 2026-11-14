@@ -34,6 +34,7 @@ int main(int argc, char** argv) {
     bool bench_decode = false;
     bool use_gpu = false;
     bool use_kv_cache = false;
+    bool use_cuda_graph = false;
     bool use_legacy_gemv = true; // Task P8c: Legacy GEMVs are default because dp4a+act_quant has higher latency
     std::string model_path = "data/models/hf-cache/snapshots/7ae557604adf67be50417f59c2c2f167def9a775";
     std::string prompt = "";
@@ -86,6 +87,10 @@ int main(int argc, char** argv) {
         } else if (arg == "--kv-cache") {
             use_gpu = true;
             use_kv_cache = true;
+        } else if (arg == "--cuda-graph") {
+            use_gpu = true;
+            use_kv_cache = true;
+            use_cuda_graph = true;
         } else if (arg == "--legacy-gemv") {
             use_legacy_gemv = true;
         } else if (arg == "--dp4a-gemv") {
@@ -200,9 +205,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    bool is_quantized = loader.has_tensor("model.layers.0.self_attn.q_proj.weight.qweight");
+    bool is_quantized = loader.has_tensor("model.layers.0.self_attn.q_proj.weight.qweight") ||
+                        loader.has_tensor("model.layers.0.self_attn.qkv_proj.weight.qweight");
+    bool is_fused = loader.has_tensor("model.layers.0.self_attn.qkv_proj.weight") ||
+                    loader.has_tensor("model.layers.0.self_attn.qkv_proj.weight.qweight");
     engine::ModelWeights weights;
-    if (!is_quantized) {
+    if (!is_quantized && !is_fused) {
         if (!weights.load_and_validate(cfg, loader)) {
             std::cerr << "Failed to validate model weights!" << std::endl;
             return 1;
@@ -747,9 +755,16 @@ int main(int argc, char** argv) {
     // Case 1c5: In-Process Decode Benchmark (--bench-decode)
     if (bench_decode) {
         std::cout << "=== In-Process Decode Benchmark (5 warmup + 20 timed iterations, 32 tokens) ===\n";
+        if (use_cuda_graph) {
+            std::cout << "Mode: CUDA Graph Decode Path\n";
+        } else {
+            std::cout << "Mode: Eager Decode Path\n";
+        }
         std::vector<int> decode_ctxs = {128, 512, 1024, 2048};
         std::string base_text = "The optimization of deep neural network inference on graphics hardware requires careful tuning of memory layouts, register allocation, and thread parallelism. ";
         std::vector<int> b_toks = tokenizer.encode(base_text, false);
+
+        engine::DecodeCudaGraph decode_graph;
 
         for (int ctx : decode_ctxs) {
             std::vector<int64_t> prompt_toks;
@@ -770,8 +785,18 @@ int main(int argc, char** argv) {
                 kv_cache.set_current_seq_len(0);
                 engine::prefill_gpu(prompt_toks, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle);
                 int next_token = 100;
-                for (int s = 0; s < 32; ++s) {
-                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
+                if (use_cuda_graph) {
+                    if (!decode_graph.is_captured()) {
+                        decode_graph.capture(cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle,
+                                             buffers_gpu.logits.data(), use_legacy_gemv);
+                    }
+                    for (int s = 0; s < 32; ++s) {
+                        decode_graph.launch(next_token, ctx + s, buffers_gpu);
+                    }
+                } else {
+                    for (int s = 0; s < 32; ++s) {
+                        engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
+                    }
                 }
             }
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -784,8 +809,14 @@ int main(int argc, char** argv) {
 
                 int next_token = 100;
                 CUDA_CHECK(cudaEventRecord(ev_start));
-                for (int s = 0; s < 32; ++s) {
-                    engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
+                if (use_cuda_graph) {
+                    for (int s = 0; s < 32; ++s) {
+                        decode_graph.launch(next_token, ctx + s, buffers_gpu);
+                    }
+                } else {
+                    for (int s = 0; s < 32; ++s) {
+                        engine::decode_step_gpu(next_token, ctx + s, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle, buffers_gpu.logits.data(), nullptr, use_legacy_gemv);
+                    }
                 }
                 CUDA_CHECK(cudaEventRecord(ev_stop));
                 CUDA_CHECK(cudaEventSynchronize(ev_stop));
@@ -1092,15 +1123,33 @@ int main(int argc, char** argv) {
 
         // 2. Decode
         auto t_decode_start = std::chrono::high_resolution_clock::now();
+        engine::DecodeCudaGraph decode_graph;
+        if (use_cuda_graph) {
+            decode_graph.capture(cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle,
+                                 buffers_gpu.logits.data(), use_legacy_gemv);
+        }
+
+        std::vector<float> host_logits(vocab_size);
+
         for (int step = 1; step < max_new_tokens; ++step) {
             if (sampled_token == 151645) break;
 
-            std::vector<float> decode_logits = engine::decode_step_gpu(
-                sampled_token, current_pos, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle,
-                nullptr, nullptr, use_legacy_gemv
-            );
+            const float* logits_ptr = nullptr;
+            if (use_cuda_graph) {
+                decode_graph.launch(sampled_token, current_pos, buffers_gpu);
+                CUDA_CHECK(cudaMemcpy(host_logits.data(), buffers_gpu.logits.data(),
+                           vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
+                logits_ptr = host_logits.data();
+            } else {
+                std::vector<float> decode_logits = engine::decode_step_gpu(
+                    sampled_token, current_pos, cfg, weights_gpu, buffers_gpu, kv_cache, cublas_handle,
+                    nullptr, nullptr, use_legacy_gemv
+                );
+                host_logits = std::move(decode_logits);
+                logits_ptr = host_logits.data();
+            }
 
-            sampled_token = sampler.sample_from_float_host(decode_logits.data(), tokens, sampler_cfg);
+            sampled_token = sampler.sample_from_float_host(logits_ptr, tokens, sampler_cfg);
             generated_tokens.push_back(sampled_token);
             tokens.push_back(sampled_token);
             current_pos++;
