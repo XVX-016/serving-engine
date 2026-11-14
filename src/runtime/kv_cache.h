@@ -90,5 +90,19 @@ void append_kv_cache(
     cudaStream_t stream = 0
 );
 
+// Append with device-pointer start_pos (for CUDA Graph capture)
+void append_kv_cache_device_pos(
+    const half* src_k,
+    const half* src_v,
+    half* dst_k_head_base,
+    half* dst_v_head_base,
+    int num_tokens,
+    const int* d_pos,
+    int num_kv_heads,
+    int max_seq,
+    int head_dim,
+    cudaStream_t stream = 0
+);
+
 } // namespace cuda
 } // namespace engine

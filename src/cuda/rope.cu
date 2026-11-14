@@ -80,6 +80,74 @@ void apply_rope(
     CUDA_CHECK(cudaGetLastError());
 }
 
+__global__ void rope_device_pos_kernel(
+    half* __restrict__ q,
+    half* __restrict__ k,
+    int64_t seq_len,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const int* __restrict__ d_pos,
+    float rope_theta
+) {
+    int64_t half_dim = head_dim / 2;
+    int64_t i = threadIdx.x;
+    if (i >= half_dim) return;
+
+    int64_t s = blockIdx.x;
+    int64_t h = blockIdx.y;
+
+    int64_t start_pos = *d_pos;
+    int64_t pos = start_pos + s;
+    float freq = 1.0f / powf(rope_theta, (2.0f * static_cast<float>(i)) / static_cast<float>(head_dim));
+    float val = static_cast<float>(pos) * freq;
+    float cos_val = cosf(val);
+    float sin_val = sinf(val);
+
+    if (h < num_q_heads) {
+        int64_t q_offset = (s * num_q_heads + h) * head_dim;
+        float x1 = __half2float(q[q_offset + i]);
+        float x2 = __half2float(q[q_offset + i + half_dim]);
+        float out1 = x1 * cos_val - x2 * sin_val;
+        float out2 = x2 * cos_val + x1 * sin_val;
+        q[q_offset + i] = __float2half(out1);
+        q[q_offset + i + half_dim] = __float2half(out2);
+    }
+
+    if (h < num_kv_heads) {
+        int64_t k_offset = (s * num_kv_heads + h) * head_dim;
+        float x1 = __half2float(k[k_offset + i]);
+        float x2 = __half2float(k[k_offset + i + half_dim]);
+        float out1 = x1 * cos_val - x2 * sin_val;
+        float out2 = x2 * cos_val + x1 * sin_val;
+        k[k_offset + i] = __float2half(out1);
+        k[k_offset + i + half_dim] = __float2half(out2);
+    }
+}
+
+void apply_rope_device_pos(
+    half* q,
+    half* k,
+    int64_t seq_len,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const int* d_pos,
+    float rope_theta,
+    cudaStream_t stream
+) {
+    if (seq_len <= 0) return;
+    int64_t max_heads = (num_q_heads > num_kv_heads) ? num_q_heads : num_kv_heads;
+    dim3 grid(static_cast<unsigned int>(seq_len), static_cast<unsigned int>(max_heads));
+    int threads = static_cast<int>(head_dim / 2);
+    if (threads < 1) threads = 1;
+
+    rope_device_pos_kernel<<<grid, threads, 0, stream>>>(
+        q, k, seq_len, num_q_heads, num_kv_heads, head_dim, d_pos, rope_theta
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace cuda
 } // namespace engine
 

@@ -60,6 +60,58 @@ void append_kv_cache(
     CUDA_CHECK(cudaGetLastError());
 }
 
+__global__ void append_kv_device_pos_kernel(
+    const half* __restrict__ src_k,
+    const half* __restrict__ src_v,
+    half* __restrict__ dst_k,
+    half* __restrict__ dst_v,
+    int num_tokens,
+    const int* __restrict__ d_pos,
+    int num_kv_heads,
+    int max_seq,
+    int head_dim
+) {
+    int token_idx = blockIdx.x;
+    int kv_h = blockIdx.y;
+    int d = threadIdx.x;
+
+    if (token_idx >= num_tokens || kv_h >= num_kv_heads || d >= head_dim) return;
+
+    int pos = *d_pos + token_idx;
+    if (pos >= max_seq) return;
+
+    size_t src_offset = (static_cast<size_t>(token_idx) * num_kv_heads + kv_h) * head_dim + d;
+    size_t dst_offset = (static_cast<size_t>(kv_h) * max_seq + pos) * head_dim + d;
+
+    dst_k[dst_offset] = src_k[src_offset];
+    dst_v[dst_offset] = src_v[src_offset];
+}
+
+void append_kv_cache_device_pos(
+    const half* src_k,
+    const half* src_v,
+    half* dst_k_head_base,
+    half* dst_v_head_base,
+    int num_tokens,
+    const int* d_pos,
+    int num_kv_heads,
+    int max_seq,
+    int head_dim,
+    cudaStream_t stream
+) {
+    if (num_tokens <= 0) return;
+
+    dim3 grid(static_cast<unsigned int>(num_tokens), static_cast<unsigned int>(num_kv_heads));
+    int threads = head_dim;
+
+    append_kv_device_pos_kernel<<<grid, threads, 0, stream>>>(
+        src_k, src_v,
+        dst_k_head_base, dst_v_head_base,
+        num_tokens, d_pos, num_kv_heads, max_seq, head_dim
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace cuda
 } // namespace engine
 

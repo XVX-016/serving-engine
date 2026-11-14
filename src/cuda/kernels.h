@@ -68,6 +68,19 @@ void apply_rope(
     cudaStream_t stream = 0
 );
 
+// 5b. RoPE with device-pointer start_pos (for CUDA Graph capture)
+void apply_rope_device_pos(
+    half* q,
+    half* k,
+    int64_t seq_len,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const int* d_pos,
+    float rope_theta = 1000000.0f,
+    cudaStream_t stream = 0
+);
+
 // 6. Causal Grouped-Query Attention:
 // q: [seq_len, num_q_heads, head_dim]
 // k: [seq_len, num_kv_heads, head_dim]
