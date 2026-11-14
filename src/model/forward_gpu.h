@@ -59,6 +59,16 @@ struct ModelWeightsGPU {
         QuantWeightGPU gate_proj_quant;
         QuantWeightGPU up_proj_quant;
         QuantWeightGPU down_proj_quant;
+
+        // Fused weights (Task P11a)
+        bool has_fused_qkv = false;
+        DeviceBuffer<half> qkv_proj_weight;  // [1152, hidden_size] FP16
+        DeviceBuffer<half> qkv_proj_bias;    // [1152] FP16
+        QuantWeightGPU qkv_proj_quant;       // INT8 / INT4
+
+        bool has_fused_gate_up = false;
+        DeviceBuffer<half> gate_up_proj_weight; // [2*intermediate_size, hidden_size] FP16
+        QuantWeightGPU gate_up_proj_quant;      // INT8 / INT4
     };
 
     std::vector<LayerGPU> layers;
@@ -92,6 +102,13 @@ struct ActivationBuffersGPU {
     DeviceBuffer<int8_t> q8_act_H;    // [hidden_size] quantized activations for projections from H
     DeviceBuffer<int8_t> q8_act_inter;// [intermediate_size] quantized activations for down_proj
     DeviceBuffer<float> act_scale;    // [1] per-vector activation scale
+
+    // Fused Activation Buffers (Task P11a)
+    DeviceBuffer<half> qkv_out;       // [max_seq * (hidden_size + 2 * kv_dim)]
+    DeviceBuffer<half> gate_up_out;   // [max_seq * (2 * intermediate_size)]
+
+    // CUDA Graph Device Parameters (Task P11a D3)
+    DeviceBuffer<int> d_current_pos;  // [1] current decode position on device
 
     int64_t max_seq = 0;
 
@@ -147,6 +164,57 @@ std::vector<float> decode_step_gpu(
     std::vector<KernelRecord>* profile_records = nullptr,
     bool use_legacy_gemv = true
 );
+
+// Decode step recording/replay via CUDA Graph (Task P11a D3)
+// Enqueues all decode kernels on the given stream reading token_id and current_pos
+// strictly from buffers.token_ids_d and buffers.d_current_pos (and decode_seq_len).
+void decode_step_gpu_graphable(
+    const ModelConfig& config,
+    const ModelWeightsGPU& weights,
+    ActivationBuffersGPU& buffers,
+    KVCache& kv_cache,
+    cublasHandle_t cublas_handle,
+    float* d_last_logits,
+    bool use_legacy_gemv = true,
+    cudaStream_t stream = 0
+);
+
+// Class to manage capture, instantiate, and execution of decode CUDA graph
+class DecodeCudaGraph {
+public:
+    DecodeCudaGraph() = default;
+    ~DecodeCudaGraph() { destroy(); }
+
+    bool is_captured() const { return captured_; }
+
+    void capture(
+        const ModelConfig& config,
+        const ModelWeightsGPU& weights,
+        ActivationBuffersGPU& buffers,
+        KVCache& kv_cache,
+        cublasHandle_t cublas_handle,
+        float* d_last_logits,
+        bool use_legacy_gemv,
+        cudaStream_t stream = 0
+    );
+
+    void launch(
+        int64_t token_id,
+        int current_pos,
+        ActivationBuffersGPU& buffers,
+        cudaStream_t stream = 0
+    );
+
+    void destroy();
+
+    cudaStream_t stream() const { return stream_; }
+
+private:
+    cudaStream_t stream_ = nullptr;
+    cudaGraph_t graph_ = nullptr;
+    cudaGraphExec_t graph_exec_ = nullptr;
+    bool captured_ = false;
+};
 
 } // namespace engine
 
