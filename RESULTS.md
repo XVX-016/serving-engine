@@ -56,6 +56,21 @@
 | P8c  | Interleaved Decode: Engine INT4 g128 + INT8 head (Ctx 128) | 1 | 128 | 32 | - | 4.41 ms | 226.7 | 320.0 MB | - | 1.40 ms roofline ceiling (31.8% of roofline, 72.6 GB/s). Legacy default path. |
 | P8c  | Experimental Decode: Engine INT8 dp4a (Ctx 128) | 1 | 128 | 32 | - | 4.60 ms | 217.4 | 494.0 MB | - | +96 act quant launches (+0.35 ms) negate per-weight inst reduction. |
 | P8c  | Experimental Decode: Engine INT4 g128 dp4a (Ctx 128) | 1 | 128 | 32 | - | 4.72 ms | 211.9 | 320.0 MB | - | Inst/wt dropped from 24 to 2.53, but long_scoreboard stalls (55.4%) dominate. |
+| P11a | Launch Floor Microbench: Empty Kernel | - | - | - | - | 4.78 us (eager) vs 0.53 us (graph) | - | - | - | 1000 launches. Eager 315 floor: 1.51 ms. Graph 315 floor: 0.17 ms. 9x reduction in launch floor. uild\tests\bench_launch_floor.exe. |
+| P11a | Interleaved Decode: FP16 Eager (Ctx 128) | 1 | 128 | 20 | - | 5.45 ms | 183.7 | 988.1 MB | - | 4.33 ms roofline (77.7% eff). AC power, 5 warmup + 20 timed, SM 2250 MHz, Mem 8000 MHz. python scripts/bench_p11a_d4.py. |
+| P11a | Interleaved Decode: FP16 Fused-Eager (Ctx 128) | 1 | 128 | 20 | - | 5.19 ms | 192.5 | 988.1 MB | - | 81.4% eff. QKV and GateUp fused. Launches reduced from 315 to 195. |
+| P11a | Interleaved Decode: FP16 Graph (Ctx 128) | 1 | 128 | 20 | - | 5.00 ms | 199.8 | 988.1 MB | - | 84.5% eff. CUDA Graph replay of 315-launch decode step. |
+| P11a | Interleaved Decode: FP16 Fused-Graph (Ctx 128) | 1 | 128 | 20 | - | 4.86 ms | 205.8 | 988.1 MB | - | 87.0% eff. 198.5 GB/s achieved bandwidth. +12.0% throughput over eager. |
+| P11a | Interleaved Decode: INT8 Eager (Ctx 128) | 1 | 128 | 20 | - | 4.30 ms | 232.4 | 494.0 MB | - | 49.1% eff (112.1 GB/s). INT8 symmetric GEMV with INT8 LM head. |
+| P11a | Interleaved Decode: INT8 Fused-Eager (Ctx 128) | 1 | 128 | 20 | - | 3.79 ms | 263.8 | 494.0 MB | - | 55.8% eff (127.3 GB/s). |
+| P11a | Interleaved Decode: INT8 Graph (Ctx 128) | 1 | 128 | 20 | - | 3.65 ms | 274.0 | 494.0 MB | - | 57.9% eff (132.2 GB/s). |
+| P11a | Interleaved Decode: INT8 Fused-Graph (Ctx 128) | 1 | 128 | 20 | - | 3.45 ms | 290.2 | 494.0 MB | - | 61.4% eff (140.0 GB/s). +24.9% throughput over eager. |
+| P11a | Interleaved Decode: INT4 Eager (Ctx 128) | 1 | 128 | 20 | - | 4.37 ms | 228.9 | 320.0 MB | - | 31.4% eff (71.7 GB/s). INT4 g128 GEMV with INT8 LM head. |
+| P11a | Interleaved Decode: INT4 Fused-Eager (Ctx 128) | 1 | 128 | 20 | - | 3.93 ms | 254.5 | 320.0 MB | - | 34.9% eff (79.7 GB/s). |
+| P11a | Interleaved Decode: INT4 Graph (Ctx 128) | 1 | 128 | 20 | - | 3.95 ms | 253.3 | 320.0 MB | - | 34.7% eff (79.3 GB/s). |
+| P11a | Interleaved Decode: INT4 Fused-Graph (Ctx 128) | 1 | 128 | 20 | - | 3.62 ms | 276.3 | 320.0 MB | - | 37.9% eff (86.5 GB/s). +20.7% throughput over eager. |
+| P11a | Interleaved Decode: llama.cpp Q8_0 (Ctx 128) | 1 | 128 | 20 | - | 3.01 ms | 331.7 | 525.1 MB | - | 74.6% eff (170.2 GB/s). Same session interleaved baseline. |
+| P11a | Interleaved Decode: llama.cpp Q4_K_M (Ctx 128) | 1 | 128 | 20 | - | 2.67 ms | 374.4 | 391.9 MB | - | 62.8% eff (143.4 GB/s). Same session interleaved baseline.
 | P9   | INT8, FP8, INT4 KV | 32 | | | | | | | ppl: | |
 | P10  | Paged KV + batching | 1, 4, 8, 16 | | | | | | | | |
 | P11  | CUDA graphs | 1, 8 | | | | | | | | |
