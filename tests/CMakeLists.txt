@@ -59,3 +59,11 @@ target_include_directories(bench_launch_floor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(bench_launch_floor PRIVATE engine CUDA::cudart CUDA::cublas)
 set_target_properties(bench_launch_floor PROPERTIES CUDA_ARCHITECTURES "89")
 
+add_executable(check_fused_logits check_fused_logits.cpp)
+target_include_directories(check_fused_logits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(check_fused_logits PRIVATE engine CUDA::cudart CUDA::cublas)
+
+
+
+add_executable(bench_falsifying_test bench_falsifying_test.cu)
+target_link_libraries(bench_falsifying_test PRIVATE )
