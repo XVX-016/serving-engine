@@ -567,12 +567,25 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaEventDestroy(ev_step_start));
         CUDA_CHECK(cudaEventDestroy(ev_step_stop));
 
+        std::cout << "Captured CUDA Graph Node Count: " << decode_graph.node_count() << "\n";
         std::cout << "Graph step steady-state 2-event time: " << unprofiled_gpu_ms << " ms\n";
-        std::cout << "Launching 1 targeted graph step for profiling...\n";
+        std::cout << "Launching targeted graph step for profiling with precise events...\n";
+        cudaEvent_t ev_prof_start, ev_prof_stop;
+        CUDA_CHECK(cudaEventCreate(&ev_prof_start));
+        CUDA_CHECK(cudaEventCreate(&ev_prof_stop));
+
         cudaProfilerStart();
+        CUDA_CHECK(cudaEventRecord(ev_prof_start, decode_graph.stream()));
         decode_graph.launch(next_token, 134, buffers_gpu);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaEventRecord(ev_prof_stop, decode_graph.stream()));
+        CUDA_CHECK(cudaEventSynchronize(ev_prof_stop));
         cudaProfilerStop();
+
+        float profiled_replay_ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&profiled_replay_ms, ev_prof_start, ev_prof_stop));
+        std::cout << "Graph step exact profiled replay time: " << profiled_replay_ms << " ms\n";
+        CUDA_CHECK(cudaEventDestroy(ev_prof_start));
+        CUDA_CHECK(cudaEventDestroy(ev_prof_stop));
         std::cout << "Done profile_graph_step.\n";
 
         if (cublas_handle) cublasDestroy(cublas_handle);

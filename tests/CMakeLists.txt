@@ -67,3 +67,6 @@ target_link_libraries(check_fused_logits PRIVATE engine CUDA::cudart CUDA::cubla
 
 add_executable(bench_falsifying_test bench_falsifying_test.cu)
 target_link_libraries(bench_falsifying_test PRIVATE )
+
+add_executable(bench_real_shapes bench_real_shapes.cu)
+target_link_libraries(bench_real_shapes PRIVATE )

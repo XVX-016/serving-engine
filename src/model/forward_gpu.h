@@ -186,6 +186,12 @@ public:
     ~DecodeCudaGraph() { destroy(); }
 
     bool is_captured() const { return captured_; }
+    size_t node_count() const {
+        if (!graph_) return 0;
+        size_t num_nodes = 0;
+        cudaGraphGetNodes(graph_, nullptr, &num_nodes);
+        return num_nodes;
+    }
 
     void capture(
         const ModelConfig& config,

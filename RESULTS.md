@@ -80,7 +80,9 @@
 | P11b | Interleaved Decode: llama.cpp F16 (Ctx 128) | 1 | 128 | 32 | - | 5.03 ms | 198.9 | 989.8 MB | - | 86.3% roofline ceiling (196.92 GB/s). Tied embeddings read as output.weight. Forward only. |
 | P11b | Interleaved Decode: llama.cpp Q8_0 (Ctx 128) | 1 | 128 | 32 | - | 3.02 ms | 331.2 | 526.7 MB | - | 76.5% roofline ceiling (174.44 GB/s). Tied embeddings read as output.weight. Forward only. |
 | P11b | Interleaved Decode: llama.cpp Q4_K_M (Ctx 128) | 1 | 128 | 32 | - | 2.68 ms | 373.2 | 393.4 MB | - | 64.3% roofline ceiling (146.65 GB/s). Explicit Q8_0 head (144.6 MB), unread Q5_0 embed. Forward only. |
-| P11b | Deliverable 6 (P12 Megakernel Gap Analysis) | - | - | - | - | - | - | - | - | Gap (a) addressable: FP16 -5.1%, INT4 -8.9% (<15% for both). Gap (b) kernel efficiency: FP16 15.0%, INT4 64.0%. Megakernel stopped; kernel efficiency dominates. |
+| P11b | Deliverable 6 (P12 Megakernel Gap Analysis) | - | - | - | - | - | - | - | - | Retracted (method: mixed clock states: benchmark graph steps were compared against clock-locked NCU kernel sums, producing negative gaps -5.1% and -8.9% and misleading bubble claims; replaced by P11c same-clock analysis). |
+| P11c | Same-Clock Kernel Accounting & Gap Analysis | - | - | - | - | - | - | - | - | Evaluated with --clock-control none --cache-control none in same process. FP16: step 5.581 ms, sum 5.111 ms (gap a: 8.4%, gap b: 15.1%). INT8: step 4.063 ms, sum 3.693 ms (gap a: 9.1%, gap b: 41.1%). INT4: step 4.284 ms, sum 3.928 ms (gap a: 8.3%, gap b: 64.0%). Both (a) < 15%. Kernel efficiency (b) dominates. |
+| P11c | Interleaved Decode: INT4 Split-K Fused-Graph (Ctx 128) | 1 | 128 | 32 | - | 3.28 ms | 304.8 | 322.7 MB | - | 1.41 ms roofline ceiling (43.1% of 228.15 GB/s, 98.38 GB/s). 2-warp Split-K with shared reduction improves step from 3.61 ms to 3.28 ms (+9.06% speedup). Bit-exact with baseline. |
 | P9   | INT8, FP8, INT4 KV | 32 | | | | | | | ppl: | |
 | P10  | Paged KV + batching | 1, 4, 8, 16 | | | | | | | | |
 | P11  | CUDA graphs | 1, 8 | | | | | | | | |
