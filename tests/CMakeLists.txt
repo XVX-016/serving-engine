@@ -95,6 +95,10 @@ add_executable(bench_wave_sweep bench_wave_sweep.cu)
 target_link_libraries(bench_wave_sweep PRIVATE CUDA::cudart)
 set_target_properties(bench_wave_sweep PROPERTIES CUDA_ARCHITECTURES "89")
 
+add_executable(bench_wave_single bench_wave_single.cu)
+target_link_libraries(bench_wave_single PRIVATE CUDA::cudart)
+set_target_properties(bench_wave_single PROPERTIES CUDA_ARCHITECTURES "89")
+
 add_executable(bench_persistent_shape bench_persistent_shape.cu)
 target_include_directories(bench_persistent_shape PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(bench_persistent_shape PRIVATE CUDA::cudart)
