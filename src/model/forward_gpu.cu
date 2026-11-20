@@ -832,8 +832,10 @@ std::vector<float> decode_step_gpu(
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps);
         timed_end(lp + "input_rmsnorm");
 
-        // If using dp4a, quantize norm_out activation vector to INT8
-        bool do_dp4a = !use_legacy_gemv && (weights.quant_mode == QuantMode::INT8 || weights.quant_mode == QuantMode::INT4_G128);
+        // dp4a is used for INT8 when !use_legacy_gemv.
+        // INT4 uses Split-K (via gemv_int4_g128_bias) when !use_legacy_gemv, NOT dp4a
+        // (INT4 dp4a was +14% slower than Split-K in P11c interleaved benchmark).
+        bool do_dp4a = !use_legacy_gemv && weights.quant_mode == QuantMode::INT8;
         if (do_dp4a) {
             timed_begin(lp + "quant_act_norm");
             cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
@@ -863,6 +865,11 @@ std::vector<float> decode_step_gpu(
                                                   lw.qkv_proj_quant.scales.data(), buffers.q8_act_H.data(),
                                                   buffers.act_scale.data(), lw.qkv_proj_bias.data(), buffers.qkv_out.data(),
                                                   qkv_dim, static_cast<int>(H));
+                } else if (use_legacy_gemv) {
+                    cuda::gemv_int4_g128_bias_legacy(lw.qkv_proj_quant.qweight.data(),
+                                                    lw.qkv_proj_quant.scales.data(), buffers.norm_out.data(),
+                                                    lw.qkv_proj_bias.data(), buffers.qkv_out.data(),
+                                                    qkv_dim, static_cast<int>(H));
                 } else {
                     cuda::gemv_int4_g128_bias(lw.qkv_proj_quant.qweight.data(),
                                              lw.qkv_proj_quant.scales.data(), buffers.norm_out.data(),
@@ -1057,6 +1064,11 @@ std::vector<float> decode_step_gpu(
                                                   buffers.act_scale.data(), buffers.hidden_states.data(),
                                                   buffers.hidden_states.data(),
                                                   static_cast<int>(H), static_cast<int>(H));
+            } else if (use_legacy_gemv) {
+                cuda::gemv_int4_g128_residual_legacy(lw.o_proj_quant.qweight.data(),
+                                                    lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
+                                                    buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                                    static_cast<int>(H), static_cast<int>(H));
             } else {
                 cuda::gemv_int4_g128_residual(lw.o_proj_quant.qweight.data(),
                                              lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
@@ -1249,7 +1261,8 @@ std::vector<float> decode_step_gpu(
     float* target_logits = d_last_logits ? d_last_logits : buffers.logits.data();
     timed_begin("lm_head");
     if (weights.embed_is_quantized) {
-        if (!use_legacy_gemv) {
+        bool head_dp4a = !use_legacy_gemv && weights.quant_mode == QuantMode::INT8;
+        if (head_dp4a) {
             // Quantize final norm_out for dp4a LM head
             cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
                                            buffers.act_scale.data(), static_cast<int>(H));
@@ -1318,7 +1331,8 @@ void decode_step_gpu_graphable(
         cuda::rmsnorm(buffers.hidden_states.data(), lw.input_layernorm.data(),
                       buffers.norm_out.data(), 1, H, config.rms_norm_eps, stream);
 
-        bool do_dp4a = !use_legacy_gemv && (weights.quant_mode == QuantMode::INT8 || weights.quant_mode == QuantMode::INT4_G128);
+        // dp4a for INT8 only; INT4 uses Split-K via gemv_int4_g128_bias when !use_legacy_gemv
+        bool do_dp4a = !use_legacy_gemv && weights.quant_mode == QuantMode::INT8;
         if (do_dp4a) {
             cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
                                            buffers.act_scale.data(), static_cast<int>(H), stream);
@@ -1345,6 +1359,11 @@ void decode_step_gpu_graphable(
                                                   lw.qkv_proj_quant.scales.data(), buffers.q8_act_H.data(),
                                                   buffers.act_scale.data(), lw.qkv_proj_bias.data(), buffers.qkv_out.data(),
                                                   qkv_dim, static_cast<int>(H), stream);
+                } else if (use_legacy_gemv) {
+                    cuda::gemv_int4_g128_bias_legacy(lw.qkv_proj_quant.qweight.data(),
+                                                    lw.qkv_proj_quant.scales.data(), buffers.norm_out.data(),
+                                                    lw.qkv_proj_bias.data(), buffers.qkv_out.data(),
+                                                    qkv_dim, static_cast<int>(H), stream);
                 } else {
                     cuda::gemv_int4_g128_bias(lw.qkv_proj_quant.qweight.data(),
                                              lw.qkv_proj_quant.scales.data(), buffers.norm_out.data(),
@@ -1503,6 +1522,11 @@ void decode_step_gpu_graphable(
                                                   buffers.act_scale.data(), buffers.hidden_states.data(),
                                                   buffers.hidden_states.data(),
                                                   static_cast<int>(H), static_cast<int>(H), stream);
+            } else if (use_legacy_gemv) {
+                cuda::gemv_int4_g128_residual_legacy(lw.o_proj_quant.qweight.data(),
+                                                    lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
+                                                    buffers.hidden_states.data(), buffers.hidden_states.data(),
+                                                    static_cast<int>(H), static_cast<int>(H), stream);
             } else {
                 cuda::gemv_int4_g128_residual(lw.o_proj_quant.qweight.data(),
                                              lw.o_proj_quant.scales.data(), buffers.attn_out.data(),
@@ -1659,7 +1683,8 @@ void decode_step_gpu_graphable(
 
     // 5. LM Head
     if (weights.embed_is_quantized) {
-        if (!use_legacy_gemv) {
+        bool head_dp4a = !use_legacy_gemv && weights.quant_mode == QuantMode::INT8;
+        if (head_dp4a) {
             cuda::quantize_activation_int8(buffers.norm_out.data(), buffers.q8_act_H.data(),
                                            buffers.act_scale.data(), static_cast<int>(H), stream);
             cuda::gemv_int8_dp4a_f32(

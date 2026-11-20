@@ -3,28 +3,28 @@
 ## Decode Step Breakdown (Context = 517, Batch = 1, KV Cache Mode)
 
 - **Total Kernels Launched**: 315
-- **Host Wall Time**: 8.5272 ms
-- **GPU Busy Time**: 5.83533 ms
-- **Idle Gap Time**: 2.69187 ms (31.5681%)
+- **Host Wall Time**: 26.4676 ms
+- **GPU Busy Time**: 17.6504 ms
+- **Idle Gap Time**: 8.8172 ms (33.3132%)
 - **Is Decode Launch-Bound?**: **YES (Launch Overhead Dominant)**
 
 ## Top Operations by Accumulated GPU Time
 
 | Rank | Kernel / Operation | Total Invocations | Total Time (ms) | % of GPU Time |
 |---|---|---|---|---|
-| 1 | `gate_proj` | 24 | 0.93696 | 16.0567% |
-| 2 | `up_proj` | 24 | 0.922368 | 15.8066% |
-| 3 | `lm_head` | 1 | 0.615488 | 10.5476% |
-| 4 | `down_proj_residual` | 24 | 0.599136 | 10.2674% |
-| 5 | `decode_attention` | 24 | 0.536096 | 9.18708% |
-| 6 | `q_proj` | 24 | 0.363904 | 6.23622% |
-| 7 | `o_proj_residual` | 24 | 0.362016 | 6.20387% |
-| 8 | `v_proj` | 24 | 0.317504 | 5.44107% |
-| 9 | `cache_append` | 24 | 0.243264 | 4.16881% |
-| 10 | `k_proj` | 24 | 0.23968 | 4.1074% |
-| 11 | `input_rmsnorm` | 24 | 0.18704 | 3.2053% |
-| 12 | `post_rmsnorm` | 24 | 0.177696 | 3.04518% |
-| 13 | `swiglu` | 24 | 0.164032 | 2.81102% |
-| 14 | `rope` | 24 | 0.151168 | 2.59057% |
-| 15 | `embedding` | 1 | 0.012 | 0.205644% |
-| 16 | `final_rmsnorm` | 1 | 0.006976 | 0.119548% |
+| 1 | `decode_attention` | 24 | 1.94602 | 11.0253% |
+| 2 | `up_proj` | 24 | 1.41968 | 8.04333% |
+| 3 | `lm_head` | 1 | 1.3096 | 7.41966% |
+| 4 | `gate_proj` | 24 | 1.30499 | 7.39355% |
+| 5 | `down_proj_residual` | 24 | 1.2607 | 7.14264% |
+| 6 | `cache_append` | 24 | 1.21312 | 6.87305% |
+| 7 | `v_proj` | 24 | 1.18848 | 6.73345% |
+| 8 | `q_proj` | 24 | 1.1673 | 6.61343% |
+| 9 | `swiglu` | 24 | 1.12886 | 6.39569% |
+| 10 | `o_proj_residual` | 24 | 1.11805 | 6.33441% |
+| 11 | `post_rmsnorm` | 24 | 1.11494 | 6.31682% |
+| 12 | `input_rmsnorm` | 24 | 1.11277 | 6.30449% |
+| 13 | `rope` | 24 | 1.0905 | 6.17831% |
+| 14 | `k_proj` | 24 | 1.0729 | 6.07859% |
+| 15 | `embedding` | 1 | 0.15952 | 0.903776% |
+| 16 | `final_rmsnorm` | 1 | 0.042976 | 0.243485% |

@@ -963,6 +963,53 @@ void gemv_int4_g128_residual(
     CUDA_CHECK(cudaGetLastError());
 }
 
+void gemv_int4_g128_legacy(
+    const uint8_t* W_q,
+    const half* scales,
+    const half* x,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream
+) {
+    if (N <= 0 || K <= 0) return;
+    int blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    gemv_int4_kernel<EpiNone, 128><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(W_q, scales, x, nullptr, y, N, K);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void gemv_int4_g128_bias_legacy(
+    const uint8_t* W_q,
+    const half* scales,
+    const half* x,
+    const half* b,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream
+) {
+    if (N <= 0 || K <= 0) return;
+    int blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    gemv_int4_kernel<EpiBias, 128><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(W_q, scales, x, b, y, N, K);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void gemv_int4_g128_residual_legacy(
+    const uint8_t* W_q,
+    const half* scales,
+    const half* x,
+    const half* r,
+    half* y,
+    int N,
+    int K,
+    cudaStream_t stream
+) {
+    if (N <= 0 || K <= 0) return;
+    int blocks = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    gemv_int4_kernel<EpiResidual, 128><<<blocks, THREADS_PER_BLOCK, 0, stream>>>(W_q, scales, x, r, y, N, K);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void dequantize_int8(
     const int8_t* W_q,
     const half* scales,

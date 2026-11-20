@@ -70,3 +70,32 @@ target_link_libraries(bench_falsifying_test PRIVATE )
 
 add_executable(bench_real_shapes bench_real_shapes.cu)
 target_link_libraries(bench_real_shapes PRIVATE )
+
+add_executable(check_splitk_vs_legacy check_splitk_vs_legacy.cpp)
+target_include_directories(check_splitk_vs_legacy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(check_splitk_vs_legacy PRIVATE engine CUDA::cudart CUDA::cublas)
+
+add_executable(debug_step1 debug_step1.cpp)
+target_include_directories(debug_step1 PRIVATE /..)
+target_link_libraries(debug_step1 PRIVATE engine CUDA::cudart CUDA::cublas)
+
+add_executable(check_teacher_forced_gate check_teacher_forced_gate.cpp)
+target_include_directories(check_teacher_forced_gate PRIVATE /..)
+target_link_libraries(check_teacher_forced_gate PRIVATE engine CUDA::cudart CUDA::cublas)
+
+add_executable(check_ppl_splitk_vs_legacy check_ppl_splitk_vs_legacy.cpp)
+target_include_directories(check_ppl_splitk_vs_legacy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(check_ppl_splitk_vs_legacy PRIVATE engine CUDA::cudart CUDA::cublas)
+
+add_executable(profile_single_kernel profile_single_kernel.cu)
+target_link_libraries(profile_single_kernel PRIVATE CUDA::cudart)
+set_target_properties(profile_single_kernel PROPERTIES CUDA_ARCHITECTURES "89")
+
+add_executable(bench_wave_sweep bench_wave_sweep.cu)
+target_link_libraries(bench_wave_sweep PRIVATE CUDA::cudart)
+set_target_properties(bench_wave_sweep PROPERTIES CUDA_ARCHITECTURES "89")
+
+add_executable(bench_persistent_shape bench_persistent_shape.cu)
+target_include_directories(bench_persistent_shape PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(bench_persistent_shape PRIVATE CUDA::cudart)
+set_target_properties(bench_persistent_shape PROPERTIES CUDA_ARCHITECTURES "89")
